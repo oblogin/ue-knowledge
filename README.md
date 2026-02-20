@@ -36,7 +36,9 @@ cp server.py ~/.ue-knowledge/server.py
 ```
 
 ```bash
-# 4. Restart Claude Code — tools will be available as mcp__ue-knowledge__*
+# 4. Install hooks (optional but recommended — see Hooks section below)
+
+# 5. Restart Claude Code — tools will be available as mcp__ue-knowledge__*
 ```
 
 ### Project-level setup
@@ -179,12 +181,90 @@ Each entry has:
 | `module` | Module documentation: what it contains, dependencies |
 | `best-practice` | Recommended approach endorsed by Epic or community consensus |
 
+## Hooks
+
+Optional hooks that automate knowledge retrieval and saving. They detect UE projects by looking for `.uproject` files and only fire in UE project directories — in non-UE projects they silently return `{}`.
+
+### Available hooks
+
+| Hook | Event | What it does |
+|------|-------|-------------|
+| `ue-kb-session-start.sh` | `UserPromptSubmit` | On first prompt in a UE project, reminds Claude to search the KB for relevant context. Fires once per session (lock file). |
+| `ue-kb-prompt-context.sh` | `UserPromptSubmit` | On every prompt in a UE project, adds a persistent reminder to save UE knowledge before ending. Lightweight, no blocking. |
+| `ue-kb-save-reminder.sh` | `Stop` | Before ending a session in a UE project, blocks stop and reminds Claude to save any UE knowledge learned. Fires once (second stop proceeds). |
+
+### UE project detection
+
+Hooks detect Unreal Engine projects by:
+
+1. Looking for `*.uproject` files in the current directory and up to 2 parent directories
+2. Checking common UE Engine paths (`C:/UE_5.7`, `C:/UE_5.5`, etc.) when the working directory contains "Unreal" or "UE_"
+
+If neither condition is met, hooks output `{}` and have zero effect.
+
+### Install hooks
+
+Add to `~/.claude/settings.json` under `"hooks"`:
+
+```jsonc
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": {},
+        "hooks": [
+          // ... your existing hooks ...
+          {
+            "type": "command",
+            "command": "bash ~/.ue-knowledge/hooks/ue-kb-session-start.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash ~/.ue-knowledge/hooks/ue-kb-prompt-context.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": {},
+        "hooks": [
+          // ... your existing hooks ...
+          {
+            "type": "command",
+            "command": "bash ~/.ue-knowledge/hooks/ue-kb-save-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### How hooks interact with EchoVault
+
+If you also use EchoVault hooks, both sets run together without conflict:
+
+- **EchoVault hooks** fire in every project — general session memory
+- **UE KB hooks** fire only in UE projects — engine-specific knowledge
+
+The Stop hooks stack: EchoVault reminds to save session decisions, UE KB reminds to save engine knowledge. Both use separate lock files (`/tmp/echovault-hooks/` and `/tmp/ue-kb-hooks/`), so they don't interfere with each other.
+
+### Uninstall hooks
+
+Remove the three `ue-kb-*` entries from `~/.claude/settings.json` under `hooks`.
+
 ## How It Works
 
 ```
 ~/.ue-knowledge/
 ├── server.py        # MCP server (single file)
 ├── knowledge.db     # SQLite database (auto-created)
+├── tests.py         # Test suite (67 tests)
+├── hooks/
+│   ├── ue-kb-session-start.sh   # First-prompt context loader
+│   ├── ue-kb-prompt-context.sh  # Persistent save reminder
+│   └── ue-kb-save-reminder.sh   # Stop blocker for saving
 └── README.md        # This file
 ```
 
@@ -243,13 +323,20 @@ sqlite3 -json ~/.ue-knowledge/knowledge.db "SELECT * FROM entries" > entries.jso
 ## Uninstall
 
 ```bash
-# 1. Remove from ~/.claude.json — delete the "ue-knowledge" entry under "mcpServers"
+# 1. Remove hooks from ~/.claude/settings.json
+# Delete the ue-kb-session-start, ue-kb-prompt-context, ue-kb-save-reminder entries
 
-# 2. Remove files
-rm -rf ~/.ue-knowledge
+# 2. Remove MCP server from ~/.claude.json
+# Delete the "ue-knowledge" entry under "mcpServers"
 
 # 3. Remove CLAUDE.md instructions (if added)
 # Edit ~/.claude/CLAUDE.md and remove the UE Knowledge Base section
+
+# 4. Remove files
+rm -rf ~/.ue-knowledge
+
+# 5. Clean up lock files
+rm -rf /tmp/ue-kb-hooks
 ```
 
 ## Limitations
