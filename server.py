@@ -192,6 +192,66 @@ CREATE TABLE IF NOT EXISTS analysis_log (
 
 CREATE INDEX IF NOT EXISTS idx_analysis_file ON analysis_log(file_path);
 CREATE INDEX IF NOT EXISTS idx_analysis_module ON analysis_log(module);
+
+-- ── Schema versioning ─────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL,
+    description TEXT DEFAULT ''
+);
+
+-- ── Entry ID foreign key indexes ──────────────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS idx_classes_entry_id ON classes(entry_id);
+CREATE INDEX IF NOT EXISTS idx_functions_entry_id ON functions(entry_id);
+CREATE INDEX IF NOT EXISTS idx_properties_entry_id ON properties(entry_id);
+
+-- ── FTS on functions ──────────────────────────────────────────────────────
+
+CREATE VIRTUAL TABLE IF NOT EXISTS functions_fts USING fts5(
+    name, qualified_name, class_name, summary, doc_comment, call_context,
+    content=functions, content_rowid=id,
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS functions_ai AFTER INSERT ON functions BEGIN
+    INSERT INTO functions_fts(rowid, name, qualified_name, class_name, summary, doc_comment, call_context)
+    VALUES (new.id, new.name, new.qualified_name, new.class_name, new.summary, new.doc_comment, new.call_context);
+END;
+CREATE TRIGGER IF NOT EXISTS functions_au AFTER UPDATE ON functions BEGIN
+    INSERT INTO functions_fts(functions_fts, rowid, name, qualified_name, class_name, summary, doc_comment, call_context)
+    VALUES ('delete', old.id, old.name, old.qualified_name, old.class_name, old.summary, old.doc_comment, old.call_context);
+    INSERT INTO functions_fts(rowid, name, qualified_name, class_name, summary, doc_comment, call_context)
+    VALUES (new.id, new.name, new.qualified_name, new.class_name, new.summary, new.doc_comment, new.call_context);
+END;
+CREATE TRIGGER IF NOT EXISTS functions_ad AFTER DELETE ON functions BEGIN
+    INSERT INTO functions_fts(functions_fts, rowid, name, qualified_name, class_name, summary, doc_comment, call_context)
+    VALUES ('delete', old.id, old.name, old.qualified_name, old.class_name, old.summary, old.doc_comment, old.call_context);
+END;
+
+-- ── FTS on properties ─────────────────────────────────────────────────────
+
+CREATE VIRTUAL TABLE IF NOT EXISTS properties_fts USING fts5(
+    name, qualified_name, class_name, summary, doc_comment, property_type,
+    content=properties, content_rowid=id,
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS properties_ai AFTER INSERT ON properties BEGIN
+    INSERT INTO properties_fts(rowid, name, qualified_name, class_name, summary, doc_comment, property_type)
+    VALUES (new.id, new.name, new.qualified_name, new.class_name, new.summary, new.doc_comment, new.property_type);
+END;
+CREATE TRIGGER IF NOT EXISTS properties_au AFTER UPDATE ON properties BEGIN
+    INSERT INTO properties_fts(properties_fts, rowid, name, qualified_name, class_name, summary, doc_comment, property_type)
+    VALUES ('delete', old.id, old.name, old.qualified_name, old.class_name, old.summary, old.doc_comment, old.property_type);
+    INSERT INTO properties_fts(rowid, name, qualified_name, class_name, summary, doc_comment, property_type)
+    VALUES (new.id, new.name, new.qualified_name, new.class_name, new.summary, new.doc_comment, new.property_type);
+END;
+CREATE TRIGGER IF NOT EXISTS properties_ad AFTER DELETE ON properties BEGIN
+    INSERT INTO properties_fts(properties_fts, rowid, name, qualified_name, class_name, summary, doc_comment, property_type)
+    VALUES ('delete', old.id, old.name, old.qualified_name, old.class_name, old.summary, old.doc_comment, old.property_type);
+END;
 """
 
 VALID_SUBSYSTEMS = [
@@ -209,6 +269,66 @@ VALID_CATEGORIES = [
 VALID_KINDS = ["class", "struct", "enum", "interface"]
 DEPTH_ORDER = {"stub": 0, "shallow": 1, "deep": 2}
 
+# Migrations for upgrading existing databases. Each: (version, description, [sql])
+MIGRATIONS = [
+    (1, "Add indexes on entry_id columns", [
+        "CREATE INDEX IF NOT EXISTS idx_classes_entry_id ON classes(entry_id)",
+        "CREATE INDEX IF NOT EXISTS idx_functions_entry_id ON functions(entry_id)",
+        "CREATE INDEX IF NOT EXISTS idx_properties_entry_id ON properties(entry_id)",
+    ]),
+    (2, "Add FTS5 for functions and properties, rebuild from existing data", [
+        """CREATE VIRTUAL TABLE IF NOT EXISTS functions_fts USING fts5(
+            name, qualified_name, class_name, summary, doc_comment, call_context,
+            content=functions, content_rowid=id, tokenize='porter unicode61')""",
+        """CREATE VIRTUAL TABLE IF NOT EXISTS properties_fts USING fts5(
+            name, qualified_name, class_name, summary, doc_comment, property_type,
+            content=properties, content_rowid=id, tokenize='porter unicode61')""",
+        """CREATE TRIGGER IF NOT EXISTS functions_ai AFTER INSERT ON functions BEGIN
+            INSERT INTO functions_fts(rowid, name, qualified_name, class_name, summary, doc_comment, call_context)
+            VALUES (new.id, new.name, new.qualified_name, new.class_name, new.summary, new.doc_comment, new.call_context);
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS functions_au AFTER UPDATE ON functions BEGIN
+            INSERT INTO functions_fts(functions_fts, rowid, name, qualified_name, class_name, summary, doc_comment, call_context)
+            VALUES ('delete', old.id, old.name, old.qualified_name, old.class_name, old.summary, old.doc_comment, old.call_context);
+            INSERT INTO functions_fts(rowid, name, qualified_name, class_name, summary, doc_comment, call_context)
+            VALUES (new.id, new.name, new.qualified_name, new.class_name, new.summary, new.doc_comment, new.call_context);
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS functions_ad AFTER DELETE ON functions BEGIN
+            INSERT INTO functions_fts(functions_fts, rowid, name, qualified_name, class_name, summary, doc_comment, call_context)
+            VALUES ('delete', old.id, old.name, old.qualified_name, old.class_name, old.summary, old.doc_comment, old.call_context);
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS properties_ai AFTER INSERT ON properties BEGIN
+            INSERT INTO properties_fts(rowid, name, qualified_name, class_name, summary, doc_comment, property_type)
+            VALUES (new.id, new.name, new.qualified_name, new.class_name, new.summary, new.doc_comment, new.property_type);
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS properties_au AFTER UPDATE ON properties BEGIN
+            INSERT INTO properties_fts(properties_fts, rowid, name, qualified_name, class_name, summary, doc_comment, property_type)
+            VALUES ('delete', old.id, old.name, old.qualified_name, old.class_name, old.summary, old.doc_comment, old.property_type);
+            INSERT INTO properties_fts(rowid, name, qualified_name, class_name, summary, doc_comment, property_type)
+            VALUES (new.id, new.name, new.qualified_name, new.class_name, new.summary, new.doc_comment, new.property_type);
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS properties_ad AFTER DELETE ON properties BEGIN
+            INSERT INTO properties_fts(properties_fts, rowid, name, qualified_name, class_name, summary, doc_comment, property_type)
+            VALUES ('delete', old.id, old.name, old.qualified_name, old.class_name, old.summary, old.doc_comment, old.property_type);
+        END""",
+        "INSERT INTO functions_fts(functions_fts) VALUES('rebuild')",
+        "INSERT INTO properties_fts(properties_fts) VALUES('rebuild')",
+    ]),
+]
+
+
+def _safe_json_loads(value, default=None):
+    """Parse JSON string with fallback. Returns default ([] if not specified) on failure."""
+    if default is None:
+        default = []
+    if not value:
+        return default
+    try:
+        result = json.loads(value)
+        return result if isinstance(result, (list, dict)) else default
+    except (json.JSONDecodeError, TypeError):
+        return default
+
 
 class KnowledgeDB:
     def __init__(self):
@@ -218,9 +338,63 @@ class KnowledgeDB:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._run_migrations()
 
     def close(self):
         self.conn.close()
+
+    def _current_schema_version(self):
+        try:
+            row = self.conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            return row[0] or 0
+        except sqlite3.OperationalError:
+            return 0
+
+    def _run_migrations(self):
+        current = self._current_schema_version()
+        now = datetime.now(timezone.utc).isoformat()
+        for version, description, statements in MIGRATIONS:
+            if version > current:
+                for stmt in statements:
+                    self.conn.execute(stmt)
+                self.conn.execute(
+                    "INSERT INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
+                    (version, now, description),
+                )
+                self.conn.commit()
+
+    @staticmethod
+    def _normalize_tags(tags):
+        """Lowercase, strip whitespace, and deduplicate tags, preserving order."""
+        if not tags:
+            return []
+        seen = set()
+        result = []
+        for tag in tags:
+            normalized = tag.strip().lower()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                result.append(normalized)
+        return result
+
+    @staticmethod
+    def _filter_by_tags(rows, tags, tag_field="tags"):
+        """Filter rows where JSON tag_field contains all specified tags."""
+        if not tags:
+            return rows
+        required = {t.strip().lower() for t in tags}
+        filtered = []
+        for row in rows:
+            raw = row.get(tag_field, "[]")
+            if isinstance(raw, str):
+                row_tags = set(_safe_json_loads(raw))
+            elif isinstance(raw, list):
+                row_tags = set(raw)
+            else:
+                row_tags = set()
+            if required.issubset(row_tags):
+                filtered.append(row)
+        return filtered
 
     def _check_duplicate(self, title):
         row = self.conn.execute(
@@ -248,7 +422,7 @@ class KnowledgeDB:
             (
                 title, subsystem, category, summary, content,
                 json.dumps(source_files or []),
-                json.dumps(tags or []),
+                json.dumps(self._normalize_tags(tags)),
                 json.dumps(related_entries or []),
                 now, now,
             ),
@@ -256,33 +430,108 @@ class KnowledgeDB:
         self.conn.commit()
         return cursor.lastrowid
 
-    def search(self, query, limit=10, subsystem=None, category=None):
+    def search(self, query, limit=10, subsystem=None, category=None, tags=None):
         terms = [t.replace('"', '').strip() for t in query.strip().split()]
         terms = [t for t in terms if t]
         if not terms:
-            return []
+            return [], 0
         fts_query = " OR ".join(f'"{t}"*' for t in terms)
 
-        sql = """
+        where = "WHERE entries_fts MATCH ?"
+        params = [fts_query]
+        if subsystem:
+            where += " AND e.subsystem = ?"
+            params.append(subsystem)
+        if category:
+            where += " AND e.category = ?"
+            params.append(category)
+
+        total = self.conn.execute(
+            f"SELECT COUNT(*) FROM entries_fts JOIN entries e ON e.id = entries_fts.rowid {where}",
+            params,
+        ).fetchone()[0]
+
+        sql = f"""
             SELECT e.id, e.title, e.subsystem, e.category, e.summary, e.tags,
                    -entries_fts.rank AS score
             FROM entries_fts
             JOIN entries e ON e.id = entries_fts.rowid
-            WHERE entries_fts MATCH ?
+            {where}
+            ORDER BY score DESC LIMIT ?
         """
-        params = [fts_query]
+        rows = [dict(row) for row in self.conn.execute(sql, params + [limit]).fetchall()]
+        if tags:
+            rows = self._filter_by_tags(rows, tags)
+        return rows, total
 
-        if subsystem:
-            sql += " AND e.subsystem = ?"
-            params.append(subsystem)
-        if category:
-            sql += " AND e.category = ?"
-            params.append(category)
+    def search_all(self, query, limit=10, subsystem=None, tags=None, tables=None):
+        """Unified search across entries, classes, functions, and properties."""
+        terms = [t.replace('"', '').strip() for t in query.strip().split()]
+        terms = [t for t in terms if t]
+        search_tables = tables or ["entries", "classes", "functions", "properties"]
+        if not terms:
+            return {t: [] for t in search_tables}
+        fts_query = " OR ".join(f'"{t}"*' for t in terms)
+        result = {}
 
-        sql += " ORDER BY score DESC LIMIT ?"
-        params.append(limit)
+        if "entries" in search_tables:
+            sql = """SELECT e.id, e.title, e.subsystem, e.category, e.summary, e.tags,
+                            -entries_fts.rank AS score
+                     FROM entries_fts JOIN entries e ON e.id = entries_fts.rowid
+                     WHERE entries_fts MATCH ?"""
+            p = [fts_query]
+            if subsystem:
+                sql += " AND e.subsystem = ?"
+                p.append(subsystem)
+            sql += " ORDER BY score DESC LIMIT ?"
+            p.append(limit)
+            rows = [dict(r) for r in self.conn.execute(sql, p).fetchall()]
+            if tags:
+                rows = self._filter_by_tags(rows, tags)
+            result["entries"] = rows
 
-        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        if "classes" in search_tables:
+            sql = """SELECT c.id, c.name, c.kind, c.subsystem, c.module, c.summary,
+                            -classes_fts.rank AS score
+                     FROM classes_fts JOIN classes c ON c.id = classes_fts.rowid
+                     WHERE classes_fts MATCH ?"""
+            p = [fts_query]
+            if subsystem:
+                sql += " AND c.subsystem = ?"
+                p.append(subsystem)
+            sql += " ORDER BY score DESC LIMIT ?"
+            p.append(limit)
+            result["classes"] = [dict(r) for r in self.conn.execute(sql, p).fetchall()]
+
+        if "functions" in search_tables:
+            sql = """SELECT f.id, f.name, f.qualified_name, f.class_name, f.subsystem,
+                            f.summary, f.is_virtual, f.is_blueprint_callable,
+                            -functions_fts.rank AS score
+                     FROM functions_fts JOIN functions f ON f.id = functions_fts.rowid
+                     WHERE functions_fts MATCH ?"""
+            p = [fts_query]
+            if subsystem:
+                sql += " AND f.subsystem = ?"
+                p.append(subsystem)
+            sql += " ORDER BY score DESC LIMIT ?"
+            p.append(limit)
+            result["functions"] = [dict(r) for r in self.conn.execute(sql, p).fetchall()]
+
+        if "properties" in search_tables:
+            sql = """SELECT p.id, p.name, p.qualified_name, p.class_name, p.subsystem,
+                            p.property_type, p.summary,
+                            -properties_fts.rank AS score
+                     FROM properties_fts JOIN properties p ON p.id = properties_fts.rowid
+                     WHERE properties_fts MATCH ?"""
+            p = [fts_query]
+            if subsystem:
+                sql += " AND p.subsystem = ?"
+                p.append(subsystem)
+            sql += " ORDER BY score DESC LIMIT ?"
+            p.append(limit)
+            result["properties"] = [dict(r) for r in self.conn.execute(sql, p).fetchall()]
+
+        return result
 
     def get(self, entry_id):
         row = self.conn.execute(
@@ -291,17 +540,18 @@ class KnowledgeDB:
         return dict(row) if row else None
 
     def list_entries(self, subsystem=None, category=None, limit=20, offset=0):
-        sql = "SELECT * FROM entries WHERE 1=1"
+        where = "WHERE 1=1"
         params = []
         if subsystem:
-            sql += " AND subsystem = ?"
+            where += " AND subsystem = ?"
             params.append(subsystem)
         if category:
-            sql += " AND category = ?"
+            where += " AND category = ?"
             params.append(category)
-        sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        total = self.conn.execute(f"SELECT COUNT(*) FROM entries {where}", params).fetchone()[0]
+        sql = f"SELECT * FROM entries {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        rows = [dict(row) for row in self.conn.execute(sql, params + [limit, offset]).fetchall()]
+        return rows, total
 
     def update(self, entry_id, **fields):
         existing = self.get(entry_id)
@@ -321,7 +571,10 @@ class KnowledgeDB:
 
         for k in ("source_files", "tags", "related_entries"):
             if k in updates and isinstance(updates[k], list):
-                updates[k] = json.dumps(updates[k])
+                if k == "tags":
+                    updates[k] = json.dumps(self._normalize_tags(updates[k]))
+                else:
+                    updates[k] = json.dumps(updates[k])
 
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -331,6 +584,8 @@ class KnowledgeDB:
         return True
 
     def delete(self, entry_id):
+        for table in ("classes", "functions", "properties"):
+            self.conn.execute(f"UPDATE {table} SET entry_id = NULL WHERE entry_id = ?", (entry_id,))
         cursor = self.conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
         self.conn.commit()
         return cursor.rowcount > 0
@@ -363,14 +618,14 @@ class KnowledgeDB:
 
     @staticmethod
     def _merge_json_arrays(old_json, new_list):
-        old = json.loads(old_json) if old_json else []
+        old = _safe_json_loads(old_json)
         merged = list(old)
         for item in (new_list or []):
             if item not in merged:
                 merged.append(item)
         return json.dumps(merged)
 
-    def save_class(self, name, kind, subsystem, module, header_path, **kwargs):
+    def save_class(self, name, kind, subsystem, module, header_path, _commit=True, **kwargs):
         if kind not in VALID_KINDS:
             raise ValueError(f"Invalid kind: '{kind}'. Valid: {', '.join(VALID_KINDS)}")
         if subsystem not in VALID_SUBSYSTEMS:
@@ -408,7 +663,8 @@ class KnowledgeDB:
                 set_clause = ", ".join(f"{k} = ?" for k in updates)
                 values = list(updates.values()) + [name]
                 self.conn.execute(f"UPDATE classes SET {set_clause} WHERE name = ?", values)
-                self.conn.commit()
+                if _commit:
+                    self.conn.commit()
             return {"upserted": True, "id": existing["id"], "name": name, "action": "updated"}
         else:
             json_fields = {}
@@ -440,7 +696,8 @@ class KnowledgeDB:
                     now, now,
                 ),
             )
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
             return {"upserted": True, "id": cursor.lastrowid, "name": name, "action": "created"}
 
     def get_class(self, name):
@@ -450,10 +707,11 @@ class KnowledgeDB:
         d = dict(row)
         for f in ("inheritance_chain", "known_children", "interfaces",
                   "key_methods", "key_properties", "key_delegates", "related_classes"):
-            d[f] = json.loads(d[f]) if d[f] else []
+            d[f] = _safe_json_loads(d[f])
         return d
 
-    def query_hierarchy(self, class_name, direction="both", depth=10):
+    def query_hierarchy(self, class_name, direction="both", depth=10,
+                        max_children_per_level=50, max_total=500):
         result = {"class": class_name, "parents": [], "children": []}
         if direction in ("parents", "both"):
             current = class_name
@@ -466,22 +724,31 @@ class KnowledgeDB:
                 result["parents"].append(row["parent_class"])
                 current = row["parent_class"]
         if direction in ("children", "both"):
+            total_count = [0]
+
             def _get_children(name, d):
-                if d <= 0:
+                if d <= 0 or total_count[0] >= max_total:
                     return []
                 rows = self.conn.execute(
-                    "SELECT name FROM classes WHERE parent_class = ?", (name,)
+                    "SELECT name FROM classes WHERE parent_class = ? LIMIT ?",
+                    (name, max_children_per_level),
                 ).fetchall()
                 children = []
                 for r in rows:
+                    if total_count[0] >= max_total:
+                        break
+                    total_count[0] += 1
                     children.append({"name": r["name"], "children": _get_children(r["name"], d - 1)})
                 return children
+
             result["children"] = _get_children(class_name, depth)
+            if total_count[0] >= max_total:
+                result["truncated"] = True
         return result
 
     # ── Functions ─────────────────────────────────────────────────────────────
 
-    def save_function(self, name, subsystem, **kwargs):
+    def save_function(self, name, subsystem, _commit=True, **kwargs):
         if subsystem not in VALID_SUBSYSTEMS:
             raise ValueError(f"Invalid subsystem: '{subsystem}'")
         class_name = kwargs.get("class_name")
@@ -519,7 +786,8 @@ class KnowledgeDB:
             set_clause = ", ".join(f"{k} = ?" for k in fields)
             values = list(fields.values()) + [qualified]
             self.conn.execute(f"UPDATE functions SET {set_clause} WHERE qualified_name = ?", values)
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
             return {"upserted": True, "id": existing["id"], "qualified_name": qualified, "action": "updated"}
         else:
             fields["created_at"] = now
@@ -528,7 +796,8 @@ class KnowledgeDB:
             cursor = self.conn.execute(
                 f"INSERT INTO functions ({cols}) VALUES ({placeholders})", list(fields.values())
             )
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
             return {"upserted": True, "id": cursor.lastrowid, "qualified_name": qualified, "action": "created"}
 
     def query_calls(self, function_name, direction="both", depth=3):
@@ -547,9 +816,9 @@ class KnowledgeDB:
             "call_order": row["call_order"],
         }
         if direction in ("callees", "both"):
-            result["calls_into"] = json.loads(row["calls_into"]) if row["calls_into"] else []
+            result["calls_into"] = _safe_json_loads(row["calls_into"])
         if direction in ("callers", "both"):
-            result["called_by"] = json.loads(row["called_by"]) if row["called_by"] else []
+            result["called_by"] = _safe_json_loads(row["called_by"])
         return result
 
     def query_class_full(self, class_name, include_methods=True, include_properties=True):
@@ -564,9 +833,9 @@ class KnowledgeDB:
             result["functions"] = []
             for r in rows:
                 d = dict(r)
-                d["parameters"] = json.loads(d["parameters"]) if d["parameters"] else []
-                d["calls_into"] = json.loads(d["calls_into"]) if d["calls_into"] else []
-                d["called_by"] = json.loads(d["called_by"]) if d["called_by"] else []
+                d["parameters"] = _safe_json_loads(d["parameters"])
+                d["calls_into"] = _safe_json_loads(d["calls_into"])
+                d["called_by"] = _safe_json_loads(d["called_by"])
                 result["functions"].append(d)
         if include_properties:
             rows = self.conn.execute(
@@ -582,7 +851,7 @@ class KnowledgeDB:
 
     # ── Properties ────────────────────────────────────────────────────────────
 
-    def save_property(self, name, class_name, subsystem, property_type, **kwargs):
+    def save_property(self, name, class_name, subsystem, property_type, _commit=True, **kwargs):
         if subsystem not in VALID_SUBSYSTEMS:
             raise ValueError(f"Invalid subsystem: '{subsystem}'")
         qualified = f"{class_name}::{name}"
@@ -612,7 +881,8 @@ class KnowledgeDB:
             set_clause = ", ".join(f"{k} = ?" for k in fields)
             values = list(fields.values()) + [qualified]
             self.conn.execute(f"UPDATE properties SET {set_clause} WHERE qualified_name = ?", values)
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
             return {"upserted": True, "id": existing["id"], "qualified_name": qualified, "action": "updated"}
         else:
             fields["created_at"] = now
@@ -621,8 +891,36 @@ class KnowledgeDB:
             cursor = self.conn.execute(
                 f"INSERT INTO properties ({cols}) VALUES ({placeholders})", list(fields.values())
             )
-            self.conn.commit()
+            if _commit:
+                self.conn.commit()
             return {"upserted": True, "id": cursor.lastrowid, "qualified_name": qualified, "action": "created"}
+
+    # ── Batch Save ────────────────────────────────────────────────────────────
+
+    def save_batch(self, items):
+        """Save multiple classes/functions/properties in a single transaction.
+        Each item: {"type": "class"|"function"|"property", ...fields}.
+        Returns list of results; individual errors don't abort others."""
+        results = []
+        errors = []
+        for i, item in enumerate(items):
+            item_type = item.get("type")
+            fields = {k: v for k, v in item.items() if k != "type"}
+            try:
+                if item_type == "class":
+                    r = self.save_class(_commit=False, **fields)
+                elif item_type == "function":
+                    r = self.save_function(_commit=False, **fields)
+                elif item_type == "property":
+                    r = self.save_property(_commit=False, **fields)
+                else:
+                    errors.append({"index": i, "error": f"Invalid type: '{item_type}'"})
+                    continue
+                results.append(r)
+            except Exception as e:
+                errors.append({"index": i, "error": str(e)})
+        self.conn.commit()
+        return {"saved": len(results), "errors": errors, "results": results}
 
     # ── Analysis Log ──────────────────────────────────────────────────────────
 
@@ -740,8 +1038,8 @@ TOOLS = [
         name="ue_search",
         description=(
             "Search the UE knowledge base using full-text search. "
-            "Returns matching entries ranked by relevance. "
-            "Use this to find previously recorded knowledge about UE classes, patterns, etc."
+            "Searches entries by default; use 'tables' to also search classes, functions, properties. "
+            "Returns matching results ranked by relevance."
         ),
         inputSchema={
             "type": "object",
@@ -758,11 +1056,21 @@ TOOLS = [
                 "category": {
                     "type": "string",
                     "enum": VALID_CATEGORIES,
-                    "description": "Filter by category (optional).",
+                    "description": "Filter by category (optional). Only applies to entries.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Filter entries by tags — all specified tags must be present (optional).",
+                },
+                "tables": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["entries", "classes", "functions", "properties"]},
+                    "description": "Which tables to search. Default: entries only. Set to search across multiple tables.",
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max results (default 10).",
+                    "description": "Max results per table (default 10).",
                     "default": 10,
                 },
             },
@@ -975,6 +1283,16 @@ TOOLS = [
                 "class_name": {"type": "string"},
                 "direction": {"type": "string", "enum": ["parents", "children", "both"], "default": "both"},
                 "depth": {"type": "integer", "default": 10},
+                "max_children_per_level": {
+                    "type": "integer",
+                    "default": 50,
+                    "description": "Max children per parent node (prevents explosion on UObject etc.)",
+                },
+                "max_total": {
+                    "type": "integer",
+                    "default": 500,
+                    "description": "Max total children nodes in the whole tree.",
+                },
             },
             "required": ["class_name"],
         },
@@ -1022,6 +1340,33 @@ TOOLS = [
             "required": ["file_path", "module", "subsystem", "analysis_depth"],
         },
     ),
+    Tool(
+        name="ue_save_batch",
+        description=(
+            "Save multiple classes/functions/properties in a single transaction. "
+            "Faster than individual calls when saving many items at once."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["class", "function", "property"]},
+                        },
+                        "required": ["type"],
+                    },
+                    "description": (
+                        "Array of items. Each must have 'type' plus fields for that type. "
+                        "E.g. {\"type\":\"class\", \"name\":\"AActor\", \"kind\":\"class\", \"subsystem\":\"gameplay\", \"module\":\"Engine\", \"header_path\":\"...\"}"
+                    ),
+                },
+            },
+            "required": ["items"],
+        },
+    ),
 ]
 
 
@@ -1061,37 +1406,52 @@ def _handle(db: KnowledgeDB, name: str, args: dict):
         return {"saved": True, "id": result, "title": args["title"]}
 
     elif name == "ue_search":
-        results = db.search(
-            query=args["query"],
-            limit=args.get("limit", 10),
-            subsystem=args.get("subsystem"),
-            category=args.get("category"),
-        )
-        # Return compact results (no full content in search)
-        compact = []
-        for r in results:
-            compact.append({
-                "id": r["id"],
-                "title": r["title"],
-                "subsystem": r["subsystem"],
-                "category": r["category"],
-                "summary": r["summary"],
-                "tags": json.loads(r["tags"]) if r["tags"] else [],
-                "score": round(r.get("score", 0), 3),
-            })
-        return {"results": compact, "count": len(compact)}
+        tables = args.get("tables")
+        limit = args.get("limit", 10)
+        tags = args.get("tags")
+        if tables:
+            # Multi-table search
+            result = db.search_all(
+                query=args["query"],
+                limit=limit,
+                subsystem=args.get("subsystem"),
+                tags=tags,
+                tables=tables,
+            )
+            return result
+        else:
+            # Entries-only search (backwards compatible)
+            rows, total = db.search(
+                query=args["query"],
+                limit=limit,
+                subsystem=args.get("subsystem"),
+                category=args.get("category"),
+                tags=tags,
+            )
+            compact = []
+            for r in rows:
+                compact.append({
+                    "id": r["id"],
+                    "title": r["title"],
+                    "subsystem": r["subsystem"],
+                    "category": r["category"],
+                    "summary": r["summary"],
+                    "tags": _safe_json_loads(r["tags"]),
+                    "score": round(r.get("score", 0), 3),
+                })
+            return {"results": compact, "count": len(compact), "total_matches": total}
 
     elif name == "ue_get":
         entry = db.get(args["id"])
         if not entry:
             return {"error": f"Entry {args['id']} not found."}
-        entry["source_files"] = json.loads(entry["source_files"] or "[]")
-        entry["tags"] = json.loads(entry["tags"] or "[]")
-        entry["related_entries"] = json.loads(entry["related_entries"] or "[]")
+        entry["source_files"] = _safe_json_loads(entry["source_files"])
+        entry["tags"] = _safe_json_loads(entry["tags"])
+        entry["related_entries"] = _safe_json_loads(entry["related_entries"])
         return entry
 
     elif name == "ue_list":
-        entries = db.list_entries(
+        entries, total = db.list_entries(
             subsystem=args.get("subsystem"),
             category=args.get("category"),
             limit=args.get("limit", 20),
@@ -1105,10 +1465,10 @@ def _handle(db: KnowledgeDB, name: str, args: dict):
                 "subsystem": e["subsystem"],
                 "category": e["category"],
                 "summary": e["summary"],
-                "tags": json.loads(e["tags"]) if e["tags"] else [],
+                "tags": _safe_json_loads(e["tags"]),
                 "updated_at": e["updated_at"],
             })
-        return {"entries": compact, "count": len(compact)}
+        return {"entries": compact, "count": len(compact), "total_matches": total}
 
     elif name == "ue_update":
         entry_id = args["id"]
@@ -1156,6 +1516,8 @@ def _handle(db: KnowledgeDB, name: str, args: dict):
             class_name=args["class_name"],
             direction=args.get("direction", "both"),
             depth=args.get("depth", 10),
+            max_children_per_level=args.get("max_children_per_level", 50),
+            max_total=args.get("max_total", 500),
         )
 
     elif name == "ue_query_calls":
@@ -1176,6 +1538,9 @@ def _handle(db: KnowledgeDB, name: str, args: dict):
         required = {k: args[k] for k in ("file_path", "module", "subsystem", "analysis_depth")}
         optional = {k: v for k, v in args.items() if k not in required}
         return db.log_analysis(**required, **optional)
+
+    elif name == "ue_save_batch":
+        return db.save_batch(args["items"])
 
     return {"error": f"Unknown tool: {name}"}
 

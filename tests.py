@@ -13,7 +13,9 @@ from server import (
     VALID_CATEGORIES,
     VALID_KINDS,
     DEPTH_ORDER,
+    MIGRATIONS,
     _handle,
+    _safe_json_loads,
     SCHEMA,
 )
 
@@ -43,7 +45,8 @@ class TestSchema(unittest.TestCase):
             ).fetchall()
         }
         for t in ("entries", "entries_fts", "classes", "classes_fts",
-                   "functions", "properties", "analysis_log"):
+                   "functions", "functions_fts", "properties", "properties_fts",
+                   "analysis_log", "schema_version"):
             self.assertIn(t, tables)
 
     def test_indexes_exist(self):
@@ -57,9 +60,11 @@ class TestSchema(unittest.TestCase):
             "idx_entries_subsystem", "idx_entries_category", "idx_entries_updated",
             "idx_classes_name", "idx_classes_parent", "idx_classes_subsystem",
             "idx_classes_module", "idx_classes_kind", "idx_classes_depth",
+            "idx_classes_entry_id",
             "idx_functions_class", "idx_functions_subsystem", "idx_functions_name",
-            "idx_functions_qualified",
+            "idx_functions_qualified", "idx_functions_entry_id",
             "idx_properties_class", "idx_properties_subsystem", "idx_properties_qualified",
+            "idx_properties_entry_id",
             "idx_analysis_file", "idx_analysis_module",
         }
         for idx in expected:
@@ -73,7 +78,9 @@ class TestSchema(unittest.TestCase):
             ).fetchall()
         }
         expected = {"entries_ai", "entries_au", "entries_ad",
-                     "classes_ai", "classes_au", "classes_ad"}
+                     "classes_ai", "classes_au", "classes_ad",
+                     "functions_ai", "functions_au", "functions_ad",
+                     "properties_ai", "properties_au", "properties_ad"}
         self.assertEqual(triggers, expected)
 
     def test_empty_db_stats(self):
@@ -225,59 +232,59 @@ class TestSearch(unittest.TestCase):
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def test_search_finds_match(self):
-        results = self.db.search("lifecycle")
+        results, total = self.db.search("lifecycle")
         self.assertGreater(len(results), 0)
         self.assertEqual(results[0]["title"], "AActor lifecycle")
+        self.assertGreater(total, 0)
 
     def test_search_prefix_matching(self):
-        # porter stemmer: "replication" -> "replic", so prefix "replic" matches
-        results = self.db.search("replic")
+        results, _ = self.db.search("replic")
         titles = [r["title"] for r in results]
         self.assertIn("Replication overview", titles)
 
     def test_search_multiple_terms(self):
-        results = self.db.search("actor lifecycle")
+        results, _ = self.db.search("actor lifecycle")
         self.assertGreater(len(results), 0)
 
     def test_search_filter_by_subsystem(self):
-        results = self.db.search("class", subsystem="core")
+        results, _ = self.db.search("class", subsystem="core")
         for r in results:
             self.assertEqual(r["subsystem"], "core")
 
     def test_search_filter_by_category(self):
-        results = self.db.search("replication", category="architecture")
+        results, _ = self.db.search("replication", category="architecture")
         for r in results:
             self.assertEqual(r["category"], "architecture")
 
     def test_search_respects_limit(self):
-        results = self.db.search("a", limit=2)
+        results, _ = self.db.search("a", limit=2)
         self.assertLessEqual(len(results), 2)
 
     def test_search_empty_query(self):
-        self.assertEqual(self.db.search(""), [])
-        self.assertEqual(self.db.search("   "), [])
+        self.assertEqual(self.db.search(""), ([], 0))
+        self.assertEqual(self.db.search("   "), ([], 0))
 
     def test_search_quotes_sanitized(self):
-        results = self.db.search('actor "test')
-        # Should not raise, may or may not find results
+        results, _ = self.db.search('actor "test')
         self.assertIsInstance(results, list)
 
     def test_search_only_quotes(self):
-        results = self.db.search('" " "')
+        results, _ = self.db.search('" " "')
         self.assertIsInstance(results, list)
 
     def test_search_no_content_in_results(self):
-        results = self.db.search("lifecycle")
+        results, _ = self.db.search("lifecycle")
         self.assertGreater(len(results), 0)
         self.assertNotIn("content", results[0])
 
     def test_search_has_score(self):
-        results = self.db.search("lifecycle")
+        results, _ = self.db.search("lifecycle")
         self.assertIn("score", results[0])
 
     def test_search_no_match(self):
-        results = self.db.search("xyznonexistent")
+        results, total = self.db.search("xyznonexistent")
         self.assertEqual(results, [])
+        self.assertEqual(total, 0)
 
 
 class TestList(unittest.TestCase):
@@ -297,39 +304,43 @@ class TestList(unittest.TestCase):
         Path(self.tmp.name).unlink(missing_ok=True)
 
     def test_list_all(self):
-        entries = self.db.list_entries()
+        entries, total = self.db.list_entries()
         self.assertEqual(len(entries), 3)
+        self.assertEqual(total, 3)
 
     def test_list_filter_subsystem(self):
-        entries = self.db.list_entries(subsystem="gameplay")
+        entries, total = self.db.list_entries(subsystem="gameplay")
         self.assertEqual(len(entries), 2)
+        self.assertEqual(total, 2)
 
     def test_list_filter_category(self):
-        entries = self.db.list_entries(category="class")
+        entries, _ = self.db.list_entries(category="class")
         self.assertEqual(len(entries), 2)
 
     def test_list_filter_both(self):
-        entries = self.db.list_entries(subsystem="gameplay", category="class")
+        entries, _ = self.db.list_entries(subsystem="gameplay", category="class")
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["title"], "A")
 
     def test_list_limit(self):
-        entries = self.db.list_entries(limit=1)
+        entries, total = self.db.list_entries(limit=1)
         self.assertEqual(len(entries), 1)
+        self.assertEqual(total, 3)
 
     def test_list_offset(self):
-        all_entries = self.db.list_entries()
-        offset_entries = self.db.list_entries(offset=1)
+        all_entries, _ = self.db.list_entries()
+        offset_entries, _ = self.db.list_entries(offset=1)
         self.assertEqual(len(offset_entries), len(all_entries) - 1)
 
     def test_list_ordered_by_updated(self):
-        entries = self.db.list_entries()
+        entries, _ = self.db.list_entries()
         dates = [e["updated_at"] for e in entries]
         self.assertEqual(dates, sorted(dates, reverse=True))
 
     def test_list_empty_filter(self):
-        entries = self.db.list_entries(subsystem="networking")
+        entries, total = self.db.list_entries(subsystem="networking")
         self.assertEqual(entries, [])
+        self.assertEqual(total, 0)
 
 
 class TestUpdate(unittest.TestCase):
@@ -392,7 +403,7 @@ class TestUpdate(unittest.TestCase):
 
     def test_update_reflects_in_fts(self):
         self.db.update(self.entry_id, title="UniqueXYZTitle")
-        results = self.db.search("UniqueXYZTitle")
+        results, _ = self.db.search("UniqueXYZTitle")
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["id"], self.entry_id)
 
@@ -420,7 +431,7 @@ class TestDelete(unittest.TestCase):
 
     def test_delete_removes_from_fts(self):
         self.db.delete(self.entry_id)
-        results = self.db.search("ToDelete")
+        results, _ = self.db.search("ToDelete")
         self.assertEqual(results, [])
 
     def test_delete_updates_stats(self):
@@ -458,6 +469,7 @@ class TestHandle(unittest.TestCase):
         result = _handle(self.db, "ue_search", {"query": "HandleTest"})
         self.assertIn("results", result)
         self.assertIn("count", result)
+        self.assertIn("total_matches", result)
 
     def test_handle_get(self):
         result = _handle(self.db, "ue_get", {"id": self.entry_id})
@@ -473,6 +485,7 @@ class TestHandle(unittest.TestCase):
         result = _handle(self.db, "ue_list", {})
         self.assertIn("entries", result)
         self.assertIn("count", result)
+        self.assertIn("total_matches", result)
 
     def test_handle_update_does_not_mutate_args(self):
         args = {"id": self.entry_id, "summary": "Updated"}
@@ -1078,6 +1091,456 @@ class TestHandleStructured(_DBTestCase):
         result = _handle(self.db, "ue_stats", {})
         self.assertIn("structured", result)
         self.assertEqual(result["structured"]["classes"], 1)
+
+
+class TestSchemaVersion(_DBTestCase):
+    """Schema versioning and migrations."""
+
+    def test_schema_version_table_exists(self):
+        tables = {r[0] for r in self.db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        self.assertIn("schema_version", tables)
+
+    def test_migrations_applied(self):
+        version = self.db._current_schema_version()
+        self.assertEqual(version, len(MIGRATIONS))
+
+    def test_migrations_logged(self):
+        rows = self.db.conn.execute("SELECT * FROM schema_version ORDER BY version").fetchall()
+        self.assertEqual(len(rows), len(MIGRATIONS))
+        for row, (expected_ver, expected_desc, _) in zip(rows, MIGRATIONS):
+            self.assertEqual(row["version"], expected_ver)
+            self.assertEqual(row["description"], expected_desc)
+            self.assertIsNotNone(row["applied_at"])
+
+    def test_migrations_idempotent(self):
+        """Running migrations again does not re-apply them."""
+        version_before = self.db._current_schema_version()
+        self.db._run_migrations()
+        version_after = self.db._current_schema_version()
+        self.assertEqual(version_before, version_after)
+
+    def test_fresh_db_gets_all_migrations(self):
+        """New DB from SCHEMA + migrations should have latest version."""
+        self.assertEqual(self.db._current_schema_version(), len(MIGRATIONS))
+
+
+class TestSafeJsonLoads(unittest.TestCase):
+    """_safe_json_loads helper."""
+
+    def test_valid_list(self):
+        self.assertEqual(_safe_json_loads('["a", "b"]'), ["a", "b"])
+
+    def test_valid_dict(self):
+        self.assertEqual(_safe_json_loads('{"k": "v"}'), {"k": "v"})
+
+    def test_empty_string(self):
+        self.assertEqual(_safe_json_loads(""), [])
+
+    def test_none_input(self):
+        self.assertEqual(_safe_json_loads(None), [])
+
+    def test_invalid_json(self):
+        self.assertEqual(_safe_json_loads("not json"), [])
+
+    def test_json_number(self):
+        self.assertEqual(_safe_json_loads("42"), [])
+
+    def test_json_string(self):
+        self.assertEqual(_safe_json_loads('"hello"'), [])
+
+    def test_custom_default(self):
+        self.assertEqual(_safe_json_loads("bad", default={}), {})
+
+    def test_custom_default_on_none(self):
+        self.assertEqual(_safe_json_loads(None, default={}), {})
+
+
+class TestNormalizeTags(_DBTestCase):
+    """Tag normalization: lowercase, strip, dedup."""
+
+    def test_lowercase(self):
+        result = KnowledgeDB._normalize_tags(["Actor", "PAWN", "character"])
+        self.assertEqual(result, ["actor", "pawn", "character"])
+
+    def test_strip_whitespace(self):
+        result = KnowledgeDB._normalize_tags(["  actor  ", " pawn"])
+        self.assertEqual(result, ["actor", "pawn"])
+
+    def test_dedup_preserves_order(self):
+        result = KnowledgeDB._normalize_tags(["actor", "pawn", "Actor", "PAWN"])
+        self.assertEqual(result, ["actor", "pawn"])
+
+    def test_empty_tags_removed(self):
+        result = KnowledgeDB._normalize_tags(["actor", "", "  ", "pawn"])
+        self.assertEqual(result, ["actor", "pawn"])
+
+    def test_empty_input(self):
+        self.assertEqual(KnowledgeDB._normalize_tags([]), [])
+        self.assertEqual(KnowledgeDB._normalize_tags(None), [])
+
+    def test_save_normalizes_tags(self):
+        entry_id = self.db.save("Test", "core", "class", "s", "c", tags=["Actor", "  PAWN  ", "actor"])
+        entry = self.db.get(entry_id)
+        tags = json.loads(entry["tags"])
+        self.assertEqual(tags, ["actor", "pawn"])
+
+    def test_update_normalizes_tags(self):
+        entry_id = self.db.save("Test", "core", "class", "s", "c")
+        self.db.update(entry_id, tags=["Actor", "PAWN", "actor"])
+        entry = self.db.get(entry_id)
+        tags = json.loads(entry["tags"])
+        self.assertEqual(tags, ["actor", "pawn"])
+
+
+class TestSearchWithTags(_DBTestCase):
+    """Search with tag filtering."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.save("Actor entry", "gameplay", "class", "s", "c", tags=["actor", "lifecycle"])
+        self.db.save("Pawn entry", "gameplay", "class", "s", "c", tags=["pawn", "actor"])
+        self.db.save("Network entry", "networking", "architecture", "s", "c", tags=["replication"])
+
+    def test_search_with_single_tag(self):
+        results, _ = self.db.search("entry", tags=["actor"])
+        titles = [r["title"] for r in results]
+        self.assertIn("Actor entry", titles)
+        self.assertIn("Pawn entry", titles)
+        self.assertNotIn("Network entry", titles)
+
+    def test_search_with_multiple_tags(self):
+        results, _ = self.db.search("entry", tags=["actor", "lifecycle"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Actor entry")
+
+    def test_search_tag_case_insensitive(self):
+        results, _ = self.db.search("entry", tags=["ACTOR"])
+        self.assertGreater(len(results), 0)
+
+    def test_search_no_matching_tags(self):
+        results, _ = self.db.search("entry", tags=["nonexistent"])
+        self.assertEqual(len(results), 0)
+
+
+class TestSearchAll(_DBTestCase):
+    """Unified multi-table search."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.save("Actor overview", "gameplay", "class", "Actor base class", "content")
+        self.db.save_class(name="AActor", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Actor.h", summary="Base actor class")
+        self.db.save_function(name="BeginPlay", subsystem="gameplay",
+                              class_name="AActor", summary="Begin play hook")
+        self.db.save_property(name="RootComponent", class_name="AActor",
+                              subsystem="gameplay", property_type="USceneComponent*",
+                              summary="Root scene component")
+
+    def test_search_all_tables(self):
+        result = self.db.search_all("actor")
+        self.assertIn("entries", result)
+        self.assertIn("classes", result)
+        self.assertIn("functions", result)
+        self.assertIn("properties", result)
+
+    def test_search_entries_has_results(self):
+        result = self.db.search_all("actor")
+        self.assertGreater(len(result["entries"]), 0)
+
+    def test_search_classes_has_results(self):
+        result = self.db.search_all("actor")
+        self.assertGreater(len(result["classes"]), 0)
+
+    def test_search_functions_by_content(self):
+        result = self.db.search_all("BeginPlay")
+        self.assertGreater(len(result["functions"]), 0)
+
+    def test_search_properties_by_content(self):
+        result = self.db.search_all("RootComponent")
+        self.assertGreater(len(result["properties"]), 0)
+
+    def test_search_specific_tables(self):
+        result = self.db.search_all("actor", tables=["classes", "functions"])
+        self.assertIn("classes", result)
+        self.assertIn("functions", result)
+        self.assertNotIn("entries", result)
+        self.assertNotIn("properties", result)
+
+    def test_search_empty_query(self):
+        result = self.db.search_all("")
+        for table in result.values():
+            self.assertEqual(table, [])
+
+    def test_search_with_subsystem_filter(self):
+        result = self.db.search_all("actor", subsystem="gameplay")
+        self.assertGreater(len(result["entries"]), 0)
+
+    def test_search_respects_limit(self):
+        result = self.db.search_all("actor", limit=1)
+        for table in result.values():
+            self.assertLessEqual(len(table), 1)
+
+
+class TestCascadeDelete(_DBTestCase):
+    """Cascade delete: entry deletion nullifies linked structured data."""
+
+    def setUp(self):
+        super().setUp()
+        self.entry_id = self.db.save("Actor lifecycle", "gameplay", "class", "s", "c")
+        self.db.save_class(name="AActor", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Actor.h", entry_id=self.entry_id)
+        self.db.save_function(name="BeginPlay", subsystem="gameplay",
+                              class_name="AActor", entry_id=self.entry_id)
+        self.db.save_property(name="RootComponent", class_name="AActor",
+                              subsystem="gameplay", property_type="USceneComponent*",
+                              entry_id=self.entry_id)
+
+    def test_delete_nullifies_class_entry_id(self):
+        self.db.delete(self.entry_id)
+        cls = self.db.get_class("AActor")
+        self.assertIsNone(cls["entry_id"])
+
+    def test_delete_nullifies_function_entry_id(self):
+        self.db.delete(self.entry_id)
+        row = self.db.conn.execute(
+            "SELECT entry_id FROM functions WHERE qualified_name = 'AActor::BeginPlay'"
+        ).fetchone()
+        self.assertIsNone(row["entry_id"])
+
+    def test_delete_nullifies_property_entry_id(self):
+        self.db.delete(self.entry_id)
+        row = self.db.conn.execute(
+            "SELECT entry_id FROM properties WHERE qualified_name = 'AActor::RootComponent'"
+        ).fetchone()
+        self.assertIsNone(row["entry_id"])
+
+    def test_structured_data_still_exists_after_entry_delete(self):
+        self.db.delete(self.entry_id)
+        self.assertIsNotNone(self.db.get_class("AActor"))
+        fn = self.db.conn.execute("SELECT * FROM functions WHERE qualified_name = 'AActor::BeginPlay'").fetchone()
+        self.assertIsNotNone(fn)
+        prop = self.db.conn.execute("SELECT * FROM properties WHERE qualified_name = 'AActor::RootComponent'").fetchone()
+        self.assertIsNotNone(prop)
+
+
+class TestBoundedHierarchy(_DBTestCase):
+    """Bounded recursion in query_hierarchy."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.save_class(name="UObject", kind="class", subsystem="core",
+                           module="CoreUObject", header_path="Object.h")
+        # Create many children of UObject
+        for i in range(20):
+            self.db.save_class(name=f"UChild{i}", kind="class", subsystem="core",
+                               module="Core", header_path="Child.h", parent_class="UObject")
+
+    def test_max_children_per_level(self):
+        result = self.db.query_hierarchy("UObject", direction="children",
+                                          max_children_per_level=5)
+        self.assertLessEqual(len(result["children"]), 5)
+
+    def test_max_total_nodes(self):
+        result = self.db.query_hierarchy("UObject", direction="children",
+                                          max_total=3)
+        total = len(result["children"])
+        self.assertLessEqual(total, 3)
+        self.assertTrue(result.get("truncated", False))
+
+    def test_no_truncation_when_within_limits(self):
+        result = self.db.query_hierarchy("UObject", direction="children",
+                                          max_children_per_level=50, max_total=500)
+        self.assertNotIn("truncated", result)
+
+    def test_handle_passes_bounds(self):
+        result = _handle(self.db, "ue_query_hierarchy", {
+            "class_name": "UObject", "direction": "children",
+            "max_children_per_level": 3, "max_total": 5,
+        })
+        self.assertLessEqual(len(result["children"]), 3)
+
+
+class TestBatchSave(_DBTestCase):
+    """Batch save: multiple items in one transaction."""
+
+    def test_batch_classes(self):
+        items = [
+            {"type": "class", "name": "AActor", "kind": "class",
+             "subsystem": "gameplay", "module": "Engine", "header_path": "Actor.h"},
+            {"type": "class", "name": "APawn", "kind": "class",
+             "subsystem": "gameplay", "module": "Engine", "header_path": "Pawn.h"},
+        ]
+        result = self.db.save_batch(items)
+        self.assertEqual(result["saved"], 2)
+        self.assertEqual(len(result["errors"]), 0)
+
+    def test_batch_mixed_types(self):
+        items = [
+            {"type": "class", "name": "AActor", "kind": "class",
+             "subsystem": "gameplay", "module": "Engine", "header_path": "Actor.h"},
+            {"type": "function", "name": "BeginPlay", "subsystem": "gameplay", "class_name": "AActor"},
+            {"type": "property", "name": "RootComponent", "class_name": "AActor",
+             "subsystem": "gameplay", "property_type": "USceneComponent*"},
+        ]
+        result = self.db.save_batch(items)
+        self.assertEqual(result["saved"], 3)
+        self.assertEqual(len(result["errors"]), 0)
+
+    def test_batch_invalid_type(self):
+        items = [
+            {"type": "invalid", "name": "AActor"},
+        ]
+        result = self.db.save_batch(items)
+        self.assertEqual(result["saved"], 0)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("Invalid type", result["errors"][0]["error"])
+
+    def test_batch_partial_failure(self):
+        items = [
+            {"type": "class", "name": "AActor", "kind": "class",
+             "subsystem": "gameplay", "module": "Engine", "header_path": "Actor.h"},
+            {"type": "class", "name": "BadClass", "kind": "invalid",
+             "subsystem": "gameplay", "module": "Engine", "header_path": "Bad.h"},
+            {"type": "class", "name": "APawn", "kind": "class",
+             "subsystem": "gameplay", "module": "Engine", "header_path": "Pawn.h"},
+        ]
+        result = self.db.save_batch(items)
+        self.assertEqual(result["saved"], 2)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertEqual(result["errors"][0]["index"], 1)
+
+    def test_batch_data_persisted(self):
+        items = [
+            {"type": "class", "name": "AActor", "kind": "class",
+             "subsystem": "gameplay", "module": "Engine", "header_path": "Actor.h"},
+        ]
+        self.db.save_batch(items)
+        cls = self.db.get_class("AActor")
+        self.assertIsNotNone(cls)
+        self.assertEqual(cls["name"], "AActor")
+
+    def test_batch_empty_items(self):
+        result = self.db.save_batch([])
+        self.assertEqual(result["saved"], 0)
+        self.assertEqual(len(result["errors"]), 0)
+
+    def test_handle_save_batch(self):
+        result = _handle(self.db, "ue_save_batch", {
+            "items": [
+                {"type": "class", "name": "AActor", "kind": "class",
+                 "subsystem": "gameplay", "module": "Engine", "header_path": "Actor.h"},
+                {"type": "function", "name": "Tick", "subsystem": "gameplay", "class_name": "AActor"},
+            ]
+        })
+        self.assertEqual(result["saved"], 2)
+
+
+class TestHandleSearchMultiTable(_DBTestCase):
+    """Handle ue_search with tables parameter."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.save("Actor overview", "gameplay", "class", "Actor", "content")
+        self.db.save_class(name="AActor", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Actor.h", summary="Base actor")
+        self.db.save_function(name="BeginPlay", subsystem="gameplay",
+                              class_name="AActor", summary="Begin play")
+
+    def test_handle_search_with_tables(self):
+        result = _handle(self.db, "ue_search", {
+            "query": "actor", "tables": ["entries", "classes"],
+        })
+        self.assertIn("entries", result)
+        self.assertIn("classes", result)
+        self.assertNotIn("results", result)
+
+    def test_handle_search_without_tables(self):
+        result = _handle(self.db, "ue_search", {"query": "actor"})
+        self.assertIn("results", result)
+        self.assertIn("total_matches", result)
+
+    def test_handle_search_with_tags(self):
+        self.db.save("Tagged entry", "gameplay", "class", "s", "c", tags=["actor", "tagged"])
+        result = _handle(self.db, "ue_search", {
+            "query": "entry", "tags": ["tagged"],
+        })
+        titles = [r["title"] for r in result["results"]]
+        self.assertIn("Tagged entry", titles)
+
+
+class TestFTSFunctionsProperties(_DBTestCase):
+    """FTS on functions and properties tables."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.save_function(name="BeginPlay", subsystem="gameplay",
+                              class_name="AActor", summary="Called when play begins")
+        self.db.save_function(name="Tick", subsystem="gameplay",
+                              class_name="AActor", summary="Called every frame")
+        self.db.save_property(name="RootComponent", class_name="AActor",
+                              subsystem="gameplay", property_type="USceneComponent*",
+                              summary="Root scene component")
+
+    def test_function_fts_search(self):
+        result = self.db.search_all("BeginPlay", tables=["functions"])
+        self.assertGreater(len(result["functions"]), 0)
+        self.assertEqual(result["functions"][0]["name"], "BeginPlay")
+
+    def test_property_fts_search(self):
+        result = self.db.search_all("RootComponent", tables=["properties"])
+        self.assertGreater(len(result["properties"]), 0)
+        self.assertEqual(result["properties"][0]["name"], "RootComponent")
+
+    def test_function_fts_by_summary(self):
+        result = self.db.search_all("frame", tables=["functions"])
+        self.assertGreater(len(result["functions"]), 0)
+        self.assertEqual(result["functions"][0]["name"], "Tick")
+
+    def test_property_fts_by_type(self):
+        result = self.db.search_all("USceneComponent", tables=["properties"])
+        self.assertGreater(len(result["properties"]), 0)
+
+    def test_function_fts_updates_on_upsert(self):
+        self.db.save_function(name="BeginPlay", subsystem="gameplay",
+                              class_name="AActor", summary="Updated: initialization hook")
+        result = self.db.search_all("initialization", tables=["functions"])
+        self.assertGreater(len(result["functions"]), 0)
+
+
+class TestPagination(_DBTestCase):
+    """Pagination metadata (total_matches)."""
+
+    def setUp(self):
+        super().setUp()
+        for i in range(15):
+            self.db.save(f"Entry {i}", "gameplay", "class", f"Summary {i}", f"content {i}")
+
+    def test_search_total_exceeds_limit(self):
+        results, total = self.db.search("entry", limit=5)
+        self.assertLessEqual(len(results), 5)
+        self.assertGreater(total, 5)
+
+    def test_list_total_with_limit(self):
+        entries, total = self.db.list_entries(limit=5)
+        self.assertEqual(len(entries), 5)
+        self.assertEqual(total, 15)
+
+    def test_list_offset_plus_limit(self):
+        entries, total = self.db.list_entries(limit=5, offset=10)
+        self.assertEqual(len(entries), 5)
+        self.assertEqual(total, 15)
+
+    def test_handle_list_total_matches(self):
+        result = _handle(self.db, "ue_list", {"limit": 3})
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(result["total_matches"], 15)
+
+    def test_handle_search_total_matches(self):
+        result = _handle(self.db, "ue_search", {"query": "entry", "limit": 3})
+        self.assertLessEqual(result["count"], 3)
+        self.assertGreater(result["total_matches"], 3)
 
 
 if __name__ == "__main__":

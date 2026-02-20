@@ -86,7 +86,7 @@ Once installed, Claude uses the knowledge base through MCP tools automatically. 
 | Tool | Description |
 |------|-------------|
 | `ue_save` | Save a new knowledge entry |
-| `ue_search` | Full-text search across all entries |
+| `ue_search` | Full-text search across entries (and optionally classes, functions, properties) |
 | `ue_get` | Get full entry by ID |
 | `ue_list` | List entries with optional subsystem/category filters |
 | `ue_update` | Update an existing entry |
@@ -101,10 +101,11 @@ Once installed, Claude uses the knowledge base through MCP tools automatically. 
 | `ue_save_function` | Save a function/method. Upserts by qualified_name (ClassName::FuncName) |
 | `ue_save_property` | Save a UPROPERTY. Upserts by qualified_name (ClassName::PropName) |
 | `ue_query_class` | Full class info: hierarchy, methods, properties, delegates, linked narrative entry |
-| `ue_query_hierarchy` | Traverse inheritance tree (parents, children, or both) |
+| `ue_query_hierarchy` | Traverse inheritance tree (parents, children, or both) with bounded recursion |
 | `ue_query_calls` | Call chain queries: what calls a function / what it calls |
 | `ue_analysis_status` | Analysis progress: coverage by module, subsystem, depth |
 | `ue_log_analysis` | Record that a source file has been analyzed |
+| `ue_save_batch` | Save multiple classes/functions/properties in a single transaction |
 
 ### Example: save
 
@@ -130,7 +131,30 @@ Once installed, Claude uses the knowledge base through MCP tools automatically. 
 }
 ```
 
-Returns compact results (id, title, subsystem, category, summary, tags, score) ranked by FTS5 relevance. Use `ue_get` with the ID to load full content.
+Returns compact results (id, title, subsystem, category, summary, tags, score) ranked by FTS5 relevance, plus `total_matches` for pagination. Use `ue_get` with the ID to load full content.
+
+#### Multi-table search
+
+```json
+{
+  "query": "BeginPlay",
+  "tables": ["entries", "classes", "functions"],
+  "subsystem": "gameplay"
+}
+```
+
+Returns results grouped by table: `{"entries": [...], "classes": [...], "functions": [...]}`.
+
+#### Tag filtering
+
+```json
+{
+  "query": "actor",
+  "tags": ["lifecycle", "beginplay"]
+}
+```
+
+Only returns entries where all specified tags are present.
 
 ### Example: list
 
@@ -198,11 +222,27 @@ Returns full class data plus all functions and properties from the structured ta
 {
   "class_name": "ACharacter",
   "direction": "both",
-  "depth": 10
+  "depth": 10,
+  "max_children_per_level": 50,
+  "max_total": 500
 }
 ```
 
-Returns `{"parents": ["APawn", "AActor", "UObject"], "children": [...]}`.
+Returns `{"parents": ["APawn", "AActor", "UObject"], "children": [...]}`. When limits are hit, adds `"truncated": true`.
+
+### Example: save_batch
+
+```json
+{
+  "items": [
+    {"type": "class", "name": "AActor", "kind": "class", "subsystem": "gameplay", "module": "Engine", "header_path": "Actor.h"},
+    {"type": "function", "name": "BeginPlay", "subsystem": "gameplay", "class_name": "AActor"},
+    {"type": "property", "name": "RootComponent", "class_name": "AActor", "subsystem": "gameplay", "property_type": "USceneComponent*"}
+  ]
+}
+```
+
+Saves all items in a single transaction. Returns `{"saved": 3, "errors": [], "results": [...]}`.
 
 ## Entry Structure
 
@@ -500,7 +540,7 @@ Remove the three `ue-kb-*` entries from `~/.claude/settings.json` under `hooks`.
 ~/.ue-knowledge/
 ├── server.py        # MCP server (single file)
 ├── knowledge.db     # SQLite database (auto-created)
-├── tests.py         # Test suite (133 tests)
+├── tests.py         # Test suite (195 tests)
 ├── commands/
 │   └── ue-analyze.md            # /ue-analyze skill (copy to ~/.claude/commands/)
 ├── hooks/
@@ -513,18 +553,27 @@ Remove the three `ue-kb-*` entries from `~/.claude/settings.json` under `hooks`.
 **Database tables:**
 - `entries` + `entries_fts` — free-form narrative knowledge entries
 - `classes` + `classes_fts` — structured class/struct/enum/interface registry
-- `functions` — methods and functions with call chain tracking
-- `properties` — UPROPERTY fields with specifiers and replication info
+- `functions` + `functions_fts` — methods and functions with call chain tracking
+- `properties` + `properties_fts` — UPROPERTY fields with specifiers and replication info
 - `analysis_log` — source file analysis progress tracking
+- `schema_version` — migration tracking for schema upgrades
 
 **Features:**
-- **SQLite + FTS5** — full-text search with BM25 ranking and porter stemming
+- **SQLite + FTS5** — full-text search with BM25 ranking and porter stemming across all 4 content tables
 - **WAL mode** — write-ahead logging for reliability
-- **Triggers** — FTS indexes stay in sync automatically on insert/update/delete
-- **Indexes** — on all key lookup fields for fast filtering
+- **Triggers** — FTS indexes stay in sync automatically on insert/update/delete (12 triggers)
+- **Indexes** — on all key lookup fields including entry_id foreign keys
 - **Upsert with merge** — classes merge arrays on update, depth only upgrades
 - **Duplicate detection** — prevents saving entries with identical titles
 - **Validation** — subsystem, category, kind values are validated server-side
+- **Schema versioning** — automatic migrations for upgrading existing databases
+- **Cascade delete** — deleting an entry nullifies entry_id in linked classes/functions/properties
+- **Tag normalization** — tags are lowercased, stripped, and deduplicated on save
+- **Safe JSON parsing** — graceful fallback on corrupted JSON fields
+- **Bounded recursion** — hierarchy queries have configurable max_children_per_level and max_total limits
+- **Batch save** — save multiple items in a single transaction for performance
+- **Pagination metadata** — search and list return total_matches alongside results
+- **Multi-table search** — search_all queries entries, classes, functions, and properties in one call
 
 ## Data Management
 

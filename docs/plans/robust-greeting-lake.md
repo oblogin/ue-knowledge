@@ -1,123 +1,86 @@
-# Plan: Система заполнения UE Knowledge Base из исходников
+# Plan: 10 улучшений UE Knowledge Base MCP Server
 
 ## Context
 
-UE Knowledge Base содержит одну таблицу `entries` для свободных заметок. Для систематического заполнения из исходников UE (40K файлов в Engine/Source, 85K в Plugins) нужна структурированная схема для классов, функций, свойств и их взаимосвязей, а также workflow для поэтапного анализа.
+Сервер работает, 133 теста зелёные, схема с 5 таблицами. Код-ревью выявило 10 улучшений: критичные баги (FTS-поиск только по 2 из 5 таблиц, каскадное удаление, неограниченная рекурсия, json.loads без обработки ошибок) и полезные фичи (фильтр по тегам, batch-операция, нормализация тегов, индексы на FK, пагинация, версионирование схемы).
 
-## Что меняется
+## Порядок реализации
 
-### 1. Новые таблицы в `server.py` SCHEMA
+### Фаза 1 — Фундамент схемы
 
-**`classes`** — реестр UE классов/структур/enum/интерфейсов:
-- `name`, `kind` (class/struct/enum/interface), `parent_class`, `subsystem`, `module`, `header_path`
-- `class_specifiers` — UCLASS/USTRUCT спецификаторы как в исходнике
-- `doc_comment` — оригинальный `/** */` комментарий
-- `summary` — краткое описание от Claude
-- `inheritance_chain`, `known_children`, `interfaces` — JSON-массивы
-- `key_methods`, `key_properties`, `key_delegates` — JSON-массивы объектов с краткими описаниями
-- `lifecycle_order` — текстовая цепочка вызовов lifecycle
-- `analysis_depth` (stub / shallow / deep) — глубина анализа
-- `entry_id` — FK на `entries` для связи с нарративной записью
-- FTS5 таблица `classes_fts` + триггеры
+**1. Версионирование схемы (Improvement 10)**
+- Добавить таблицу `schema_version` в `SCHEMA`
+- Добавить `MIGRATIONS` список (version, description, sql_statements)
+- Добавить `_current_schema_version()` и `_run_migrations()` в KnowledgeDB
+- Вызывать `_run_migrations()` в `__init__` после `executescript(SCHEMA)`
 
-**`functions`** — ключевые методы/функции:
-- `name`, `qualified_name` (unique, например `AActor::BeginPlay`), `class_name`, `subsystem`
-- `return_type`, `parameters` (JSON), `signature_full` — полная сигнатура
-- `ufunction_specifiers` — спецификаторы как в исходнике
-- Булевы флаги: `is_virtual`, `is_const`, `is_static`, `is_blueprint_callable`, `is_blueprint_event`, `is_rpc`
-- `rpc_type` (Server/Client/NetMulticast)
-- `doc_comment`, `summary`
-- **Цепочки вызовов**: `call_context`, `call_order`, `calls_into` (JSON), `called_by` (JSON)
+**2. Индексы на entry_id (Improvement 8)**
+- В `SCHEMA`: добавить `idx_classes_entry_id`, `idx_functions_entry_id`, `idx_properties_entry_id`
+- Migration v1: те же CREATE INDEX IF NOT EXISTS для существующих БД
 
-**`properties`** — UPROPERTY свойства:
-- `name`, `qualified_name` (unique), `class_name`, `subsystem`
-- `property_type`, `default_value`, `uproperty_specifiers`
-- Булевы флаги: `is_replicated`, `is_blueprint_visible`, `is_edit_anywhere`, `is_config`
-- `replicated_using` — имя OnRep функции
-- `doc_comment`, `summary`
+**3. FTS на functions и properties (Improvement 1)**
+- В `SCHEMA`: добавить `functions_fts` и `properties_fts` (FTS5) + 6 триггеров
+- Migration v2: создать FTS-таблицы + триггеры + `INSERT INTO ...fts VALUES('rebuild')`
+- Новый метод `search_all()` — единый поиск по всем 4 FTS-таблицам
+- Расширить `ue_search` tool: новый параметр `tables` (массив из `entries/classes/functions/properties`)
+- Без `tables` — старое поведение (только entries), обратная совместимость
 
-**`analysis_log`** — трекинг прогресса:
-- `file_path`, `module`, `subsystem`, `analysis_depth`
-- `classes_found`, `functions_found`, `properties_found`, `notes`, `analyzed_at`
+**4. Каскадное удаление (Improvement 2)**
+- В `delete()`: перед DELETE добавить 3 UPDATE для SET entry_id = NULL в classes/functions/properties
 
-### 2. Новые MCP tools (8 штук)
+### Фаза 2 — Целостность данных
 
-| Tool | Назначение |
-|------|-----------|
-| `ue_save_class` | Сохранить/обновить запись о классе. Upsert по `name` с мержем массивов |
-| `ue_save_function` | Сохранить метод/функцию. Upsert по `qualified_name` |
-| `ue_save_property` | Сохранить UPROPERTY. Upsert по `qualified_name` |
-| `ue_query_class` | Полная информация о классе + его функции и свойства из всех таблиц |
-| `ue_query_hierarchy` | Обход дерева наследования (вверх/вниз/оба направления) |
-| `ue_query_calls` | Цепочки вызовов: кто вызывает функцию / что она вызывает |
-| `ue_analysis_status` | Прогресс анализа: что покрыто, на какой глубине, что осталось |
-| `ue_log_analysis` | Записать что файл был проанализирован |
+**5. Безопасный JSON (Improvement 4)**
+- Новая функция `_safe_json_loads(value, default=None)` — try/except с fallback на []
+- Заменить все 12 вызовов `json.loads()` на `_safe_json_loads()`
+- Места: `_merge_json_arrays`, `get_class`, `query_calls`, `query_class_full`, `_handle` (ue_search/ue_get/ue_list)
 
-Также расширить `ue_stats` — добавить counts по новым таблицам.
+**6. Нормализация тегов (Improvement 7)**
+- Новый метод `_normalize_tags(tags)` — lowercase, strip, dedup, сохраняя порядок
+- Применить в `save()` и `update()` перед json.dumps(tags)
 
-### 3. Логика merge-on-save
+**7. Ограничение рекурсии (Improvement 3)**
+- `query_hierarchy()`: новые параметры `max_children_per_level=50`, `max_total=500`
+- Добавить `LIMIT` в SQL-запрос children
+- Добавить счётчик `total_count`, при превышении — `result["truncated"] = True`
+- `ue_query_hierarchy` tool: добавить 2 параметра в inputSchema
+- Обновить handler в `_handle()`
 
-`ue_save_class`: если класс с таким `name` уже есть:
-- Обновить непустые поля
-- JSON-массивы (`known_children`, `interfaces`) — объединить (union), не заменять
-- `analysis_depth` — только повышать (stub → shallow → deep)
+### Фаза 3 — Новые фичи
 
-`ue_save_function` / `ue_save_property`: upsert по `qualified_name` — обновить все предоставленные поля.
+**8. Фильтрация по тегам (Improvement 5)**
+- Новый метод `_filter_by_tags(rows, tags)` — post-query фильтр по JSON-тегам
+- `search()`: новый параметр `tags` — case-insensitive, все указанные теги должны присутствовать
+- `ue_search` tool: добавить `tags` в inputSchema
 
-### 4. Skill `/ue-analyze`
+**9. Метаданные пагинации (Improvement 9)**
+- `search()`: добавить COUNT-запрос, вернуть `(rows, total_matches)` вместо `rows`
+- `list_entries()`: аналогично вернуть `(rows, total)`
+- `_handle` ue_search/ue_list: добавить `total_matches` в ответ
+- **Breaking change для внутренних вызовов**: обновить все тесты, вызывающие `search()` и `list_entries()` (~15 тестов)
 
-Файл: `~/.claude/commands/ue-analyze.md`
-
-Workflow:
-1. Проверить `ue_analysis_status` — что уже покрыто
-2. Определить целевые файлы (по имени класса / модулю / подсистеме / "next")
-3. Читать заголовочные файлы из `C:/UE_5.7/Engine/Source/` или `Plugins/`
-4. Извлекать данные по протоколу глубины:
-   - **stub** (~1 мин): имя, kind, parent, specifiers, doc_comment → `ue_save_class`
-   - **shallow** (~3-5 мин): + key_methods, key_properties, key_delegates, lifecycle → `ue_save_class`
-   - **deep** (~10-15 мин): + полные `ue_save_function` / `ue_save_property` для каждого важного метода/свойства + нарратив через `ue_save`
-5. Записать `ue_log_analysis`
-6. Обновить `known_children` у родительских классов
-
-### 5. Фазы заполнения
-
-| Фаза | Подсистема | Ключевые классы | Глубина | ~Сессий |
-|------|-----------|----------------|---------|---------|
-| 1 | Gameplay Foundation | UObject, AActor, APawn, ACharacter, AController, APlayerController, GameMode/State, Components | deep для топ-6, shallow остальное | 3 |
-| 2 | GAS | UAbilitySystemComponent, UGameplayAbility, UGameplayEffect, UAttributeSet | deep для топ-4 | 2 |
-| 3 | Networking | Replication в AActor, ActorChannel, NetDriver | shallow-deep | 2 |
-| 4 | Core UObject | UClass, UStruct, UFunction, GC, Serialization, Delegates | shallow-deep | 2 |
-| 5 | UI (Slate/UMG) | UWidget, UUserWidget, SWidget | shallow | 2 |
-| 6 | Animation | UAnimInstance, UAnimMontage, State Machines | shallow | 1 |
-| 7 | AI | BehaviorTree, EQS, AIController | shallow | 1 |
-| 8 | Enhanced Input | UInputAction, UInputMappingContext | shallow | 1 |
-| 9 | Остальное | Niagara, PCG, MassEntity, WorldPartition, Chaos | stub-shallow | по необходимости |
-
-Параллельно: **stub pass** по целым модулям (~30 классов за сессию) для быстрого построения графа наследования.
-
-### 6. Что НЕ сохранять
-
-- Приватные helper-методы
-- Deprecated API (кроме часто используемых по ошибке)
-- Платформо-специфичный код (`#if PLATFORM_WINDOWS`)
-- Editor-only код (кроме фазы editor)
-- Raw содержимое файлов — только извлечённую информацию
+**10. Batch-операция (Improvement 6)**
+- Добавить `_commit=True` параметр в `save_class`, `save_function`, `save_property`
+- Новый метод `save_batch(items)`: каждый item = `{type: "class"|"function"|"property", ...fields}`
+- Вызывает save_* с `_commit=False`, потом один `commit()`
+- Ошибки в отдельных items не ломают остальные (записываются в `errors`)
+- Новый MCP tool `ue_save_batch` + handler
 
 ## Файлы для изменения
 
 | Файл | Что делать |
 |------|-----------|
-| `~/.ue-knowledge/server.py` | Добавить 4 таблицы в SCHEMA, новые методы KnowledgeDB, 8 MCP tools, handler routing |
-| `~/.ue-knowledge/tests.py` | Тесты для каждой новой таблицы, tool, merge-логики |
-| `~/.claude/commands/ue-analyze.md` | Создать skill для workflow анализа |
-| `~/.ue-knowledge/README.md` | Документация по новым tools и workflow |
-| `~/.claude/CLAUDE.md` | Обновить описание инструментов |
+| `server.py` | SCHEMA: +1 таблица, +2 FTS, +6 триггеров, +3 индекса. KnowledgeDB: 7 новых методов, 8 изменённых. TOOLS: 3 изменённых tool, 1 новый. _handle: 4 изменённых handler, 1 новый |
+| `tests.py` | ~15 существующих тестов обновить (search/list возвращают tuple). ~56 новых тестов. 7 новых test-классов |
+| `README.md` | Обновить документацию: новый tool ue_save_batch, изменённые параметры ue_search и ue_query_hierarchy |
 
 ## Проверка
 
-1. Запустить `python -m unittest tests -v` — все тесты зелёные
-2. Запустить MCP сервер: `timeout 3 python server.py` — без ошибок
-3. Сделать тестовый прогон: `/ue-analyze AActor` — проверить что данные корректно сохраняются
-4. Проверить `ue_query_class AActor` — возвращает полную информацию
-5. Проверить `ue_query_hierarchy AActor` — показывает UObject выше, APawn/AInfo ниже
-6. Проверить `ue_stats` — показывает counts по всем таблицам
+1. `python -m unittest tests -v` — все ~189 тестов зелёные
+2. `timeout 3 python server.py` — без ошибок
+3. Удалить knowledge.db, перезапустить сервер — схема + миграции создаются с нуля
+4. Создать БД без миграций (старый формат), запустить новый сервер — миграции применяются
+5. Проверить через MCP: `ue_search` с `tables=["functions"]` находит сохранённые функции
+6. Проверить: `ue_search` с `tags=["actor"]` фильтрует корректно
+7. Проверить: `ue_save_batch` сохраняет 3 item-а атомарно
+8. Проверить: `ue_delete` entry с linked class — entry_id в классе становится NULL
