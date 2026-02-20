@@ -36,9 +36,12 @@ cp server.py ~/.ue-knowledge/server.py
 ```
 
 ```bash
-# 4. Install hooks (optional but recommended — see Hooks section below)
+# 4. Install the /ue-analyze skill (optional)
+cp commands/ue-analyze.md ~/.claude/commands/ue-analyze.md
 
-# 5. Restart Claude Code — tools will be available as mcp__ue-knowledge__*
+# 5. Install hooks (optional but recommended — see Hooks section below)
+
+# 6. Restart Claude Code — tools will be available as mcp__ue-knowledge__*
 ```
 
 ### Project-level setup
@@ -498,6 +501,8 @@ Remove the three `ue-kb-*` entries from `~/.claude/settings.json` under `hooks`.
 ├── server.py        # MCP server (single file)
 ├── knowledge.db     # SQLite database (auto-created)
 ├── tests.py         # Test suite (133 tests)
+├── commands/
+│   └── ue-analyze.md            # /ue-analyze skill (copy to ~/.claude/commands/)
 ├── hooks/
 │   ├── ue-kb-session-start.sh   # First-prompt context loader
 │   ├── ue-kb-prompt-context.sh  # Persistent save reminder
