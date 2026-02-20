@@ -78,6 +78,8 @@ Once installed, Claude uses the knowledge base through MCP tools automatically. 
 
 ### MCP Tools
 
+#### Narrative entries
+
 | Tool | Description |
 |------|-------------|
 | `ue_save` | Save a new knowledge entry |
@@ -86,7 +88,20 @@ Once installed, Claude uses the knowledge base through MCP tools automatically. 
 | `ue_list` | List entries with optional subsystem/category filters |
 | `ue_update` | Update an existing entry |
 | `ue_delete` | Delete an entry by ID |
-| `ue_stats` | Show total entries, breakdown by subsystem and category |
+| `ue_stats` | Show total entries, breakdown by subsystem/category + structured data counts |
+
+#### Structured code data
+
+| Tool | Description |
+|------|-------------|
+| `ue_save_class` | Save/update a UE class, struct, enum, or interface. Upserts by name, merges arrays, upgrades depth |
+| `ue_save_function` | Save a function/method. Upserts by qualified_name (ClassName::FuncName) |
+| `ue_save_property` | Save a UPROPERTY. Upserts by qualified_name (ClassName::PropName) |
+| `ue_query_class` | Full class info: hierarchy, methods, properties, delegates, linked narrative entry |
+| `ue_query_hierarchy` | Traverse inheritance tree (parents, children, or both) |
+| `ue_query_calls` | Call chain queries: what calls a function / what it calls |
+| `ue_analysis_status` | Analysis progress: coverage by module, subsystem, depth |
+| `ue_log_analysis` | Record that a source file has been analyzed |
 
 ### Example: save
 
@@ -123,6 +138,68 @@ Returns compact results (id, title, subsystem, category, summary, tags, score) r
   "limit": 10
 }
 ```
+
+### Example: save_class
+
+```json
+{
+  "name": "AActor",
+  "kind": "class",
+  "parent_class": "UObject",
+  "subsystem": "gameplay",
+  "module": "Engine",
+  "header_path": "Runtime/Engine/Classes/GameFramework/Actor.h",
+  "class_specifiers": "Blueprintable, BlueprintType",
+  "summary": "Base class for all actors placed in the world.",
+  "key_methods": [
+    {"name": "BeginPlay", "brief": "Called when play begins"},
+    {"name": "Tick", "brief": "Called every frame"}
+  ],
+  "analysis_depth": "shallow"
+}
+```
+
+On upsert: arrays (known_children, interfaces, key_methods, etc.) are merged (union), analysis_depth only upgrades (stub < shallow < deep).
+
+### Example: save_function
+
+```json
+{
+  "name": "BeginPlay",
+  "class_name": "AActor",
+  "subsystem": "gameplay",
+  "return_type": "void",
+  "is_virtual": true,
+  "ufunction_specifiers": "",
+  "summary": "Called when the game starts or when spawned.",
+  "calls_into": ["AActor::ReceiveBeginPlay"],
+  "called_by": ["UWorld::BeginPlay"]
+}
+```
+
+### Example: query_class
+
+```json
+{
+  "class_name": "AActor",
+  "include_methods": true,
+  "include_properties": true
+}
+```
+
+Returns full class data plus all functions and properties from the structured tables.
+
+### Example: query_hierarchy
+
+```json
+{
+  "class_name": "ACharacter",
+  "direction": "both",
+  "depth": 10
+}
+```
+
+Returns `{"parents": ["APawn", "AActor", "UObject"], "children": [...]}`.
 
 ## Entry Structure
 
@@ -180,6 +257,166 @@ Each entry has:
 | `macro` | UE macros: UPROPERTY, UFUNCTION, USTRUCT, UCLASS specifiers |
 | `module` | Module documentation: what it contains, dependencies |
 | `best-practice` | Recommended approach endorsed by Epic or community consensus |
+
+## Structured Code Tables
+
+In addition to free-form narrative entries, the KB has structured tables for systematic source code analysis.
+
+### classes
+
+Registry of UE classes, structs, enums, interfaces. Key fields:
+
+| Field | Description |
+|-------|-------------|
+| `name` | Class name (unique key for upsert) |
+| `kind` | `class`, `struct`, `enum`, `interface` |
+| `parent_class` | Direct parent class name |
+| `subsystem`, `module`, `header_path` | Location info |
+| `class_specifiers` | UCLASS/USTRUCT specifiers as in source |
+| `doc_comment` | Verbatim `/** */` comment |
+| `summary` | Claude-generated description |
+| `key_methods`, `key_properties`, `key_delegates` | JSON arrays of key members |
+| `inheritance_chain`, `known_children`, `interfaces` | JSON arrays (merged on upsert) |
+| `lifecycle_order` | Call order text |
+| `analysis_depth` | `stub` / `shallow` / `deep` (only upgrades) |
+
+### functions
+
+Key methods/functions. Key fields:
+
+| Field | Description |
+|-------|-------------|
+| `qualified_name` | Unique: `AActor::BeginPlay` |
+| `signature_full` | Full C++ signature |
+| `ufunction_specifiers` | UFUNCTION specifiers |
+| `is_virtual`, `is_const`, `is_static` | Declaration flags |
+| `is_blueprint_callable`, `is_blueprint_event`, `is_rpc` | UE flags |
+| `calls_into`, `called_by` | JSON arrays — call chain tracking |
+| `call_context`, `call_order` | When/how this gets called |
+
+### properties
+
+UPROPERTY fields. Key fields:
+
+| Field | Description |
+|-------|-------------|
+| `qualified_name` | Unique: `AActor::RootComponent` |
+| `property_type` | C++ type |
+| `uproperty_specifiers` | Full specifiers from source |
+| `is_replicated`, `replicated_using` | Replication info |
+| `is_blueprint_visible`, `is_edit_anywhere`, `is_config` | Visibility flags |
+
+### analysis_log
+
+Tracks which files have been analyzed and at what depth.
+
+### Merge-on-save behavior
+
+- `ue_save_class`: if class already exists, merges JSON arrays (union) and upgrades depth (stub < shallow < deep)
+- `ue_save_function` / `ue_save_property`: upsert by qualified_name — overwrites all provided fields
+
+## Skill: /ue-analyze
+
+Systematically analyze UE source code and populate the Knowledge Base. Reads headers from `C:/UE_5.7/Engine/Source/` and `C:/UE_5.7/Engine/Plugins/`.
+
+### Usage
+
+```
+/ue-analyze AActor                  # Analyze a class (auto-selects depth by tier)
+/ue-analyze AActor deep             # Force specific depth
+/ue-analyze Engine                  # Analyze all public headers in a module
+/ue-analyze Engine stub             # Stub pass across entire module
+/ue-analyze gameplay                # Analyze top classes for a subsystem
+/ue-analyze next                    # Auto-pick the most impactful unanalyzed target
+/ue-analyze status                  # Show analysis progress and coverage
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| Class name | `AActor`, `UAbilitySystemComponent` — find and analyze header |
+| Module name | `Engine`, `GameplayAbilities` — analyze public headers in module |
+| Subsystem | `gameplay`, `gas`, `networking` — pick top classes for subsystem |
+| `next` | Auto-pick the most impactful unanalyzed area |
+| `status` | Show `ue_analysis_status` breakdown and stop |
+
+Optional second argument: `stub`, `shallow`, or `deep` to override default depth.
+
+### Analysis depth levels
+
+Three levels of analysis, each building on the previous:
+
+#### stub (~1 min per class)
+
+Minimal structural pass. Best for building the inheritance graph quickly.
+
+What gets saved:
+- `ue_save_class`: name, kind, parent_class, outer_class, subsystem, module, header_path, class_specifiers, doc_comment
+- All UCLASS/USTRUCT/UENUM in the header (not just the main one)
+
+Use case: bulk scanning entire modules to build the class hierarchy.
+
+#### shallow (~3-5 min per class)
+
+Adds human-readable descriptions and key member summaries.
+
+Everything from stub, plus:
+- `ue_save_class`: summary, inheritance_chain, interfaces, lifecycle_order
+- `key_methods`: array of `{name, brief}` for the most important methods
+- `key_properties`: array of `{name, type, specifiers}` for key UPROPERTY fields
+- `key_delegates`: array of `{name, signature}` for delegates/events
+
+Use case: understanding a class well enough to use it correctly.
+
+#### deep (~10-15 min per class)
+
+Full analysis with per-method and per-property detail, plus call chains.
+
+Everything from shallow, plus:
+- `ue_save_function` for each public/protected method:
+  - Full C++ signature, return type, parameters
+  - UFUNCTION specifiers (BlueprintCallable, Server, etc.)
+  - Flags: virtual, const, static, blueprint_callable, blueprint_event, is_rpc
+  - doc_comment, summary, call_context, call_order
+  - Call chains: calls_into (what this function calls), called_by (who calls it)
+- `ue_save_property` for each UPROPERTY:
+  - C++ type, default value, full UPROPERTY specifiers
+  - Replication: is_replicated, replicated_using (OnRep function)
+  - Visibility: is_blueprint_visible, is_edit_anywhere, is_config
+  - doc_comment, summary
+- `ue_save` narrative entry with a detailed overview linked to the class
+
+Use case: complete reference for the most important classes.
+
+### Default depth by class tier
+
+| Tier | Classes | Default depth |
+|------|---------|---------------|
+| 1 — Core gameplay | UObject, AActor, APawn, ACharacter, APlayerController, AGameModeBase, AGameStateBase | deep |
+| 2 — Components & GAS | UActorComponent, USceneComponent, UAbilitySystemComponent, UGameplayAbility, UGameplayEffect | deep |
+| 3 — Extended gameplay | APlayerState, AController, AAIController, UMovementComponent, UCharacterMovementComponent | shallow → deep |
+| 4 — Everything else | All other classes | stub → shallow |
+
+### Workflow
+
+1. **Check coverage** → `ue_analysis_status`
+2. **Find target headers** → Glob/Grep in UE source tree
+3. **Search for existing data** → `ue_search` / `ue_query_class`
+4. **Read and analyze headers** → extract structured data
+5. **Save data** → `ue_save_class`, `ue_save_function`, `ue_save_property`
+6. **Update parents** → add this class to parent's `known_children`
+7. **Log progress** → `ue_log_analysis`
+8. **Report** → what was saved, what to analyze next
+
+### Rules
+
+- Always search before saving to avoid duplicates
+- Only save public/protected API — skip private helpers
+- Skip deprecated API (unless commonly misused)
+- Skip platform-specific code (`#if PLATFORM_WINDOWS`)
+- Preserve doc comments verbatim from source
+- Analyze all UCLASS/USTRUCT/UENUM in a header, not just the main one
 
 ## Hooks
 
@@ -260,7 +497,7 @@ Remove the three `ue-kb-*` entries from `~/.claude/settings.json` under `hooks`.
 ~/.ue-knowledge/
 ├── server.py        # MCP server (single file)
 ├── knowledge.db     # SQLite database (auto-created)
-├── tests.py         # Test suite (67 tests)
+├── tests.py         # Test suite (133 tests)
 ├── hooks/
 │   ├── ue-kb-session-start.sh   # First-prompt context loader
 │   ├── ue-kb-prompt-context.sh  # Persistent save reminder
@@ -268,12 +505,21 @@ Remove the three `ue-kb-*` entries from `~/.claude/settings.json` under `hooks`.
 └── README.md        # This file
 ```
 
+**Database tables:**
+- `entries` + `entries_fts` — free-form narrative knowledge entries
+- `classes` + `classes_fts` — structured class/struct/enum/interface registry
+- `functions` — methods and functions with call chain tracking
+- `properties` — UPROPERTY fields with specifiers and replication info
+- `analysis_log` — source file analysis progress tracking
+
+**Features:**
 - **SQLite + FTS5** — full-text search with BM25 ranking and porter stemming
 - **WAL mode** — write-ahead logging for reliability
-- **Triggers** — FTS index stays in sync automatically on insert/update/delete
-- **Indexes** — on `subsystem`, `category`, and `updated_at` for fast filtering
+- **Triggers** — FTS indexes stay in sync automatically on insert/update/delete
+- **Indexes** — on all key lookup fields for fast filtering
+- **Upsert with merge** — classes merge arrays on update, depth only upgrades
 - **Duplicate detection** — prevents saving entries with identical titles
-- **Validation** — subsystem and category values are validated server-side
+- **Validation** — subsystem, category, kind values are validated server-side
 
 ## Data Management
 

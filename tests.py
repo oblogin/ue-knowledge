@@ -11,6 +11,8 @@ from server import (
     KnowledgeDB,
     VALID_SUBSYSTEMS,
     VALID_CATEGORIES,
+    VALID_KINDS,
+    DEPTH_ORDER,
     _handle,
     SCHEMA,
 )
@@ -40,8 +42,9 @@ class TestSchema(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-        self.assertIn("entries", tables)
-        self.assertIn("entries_fts", tables)
+        for t in ("entries", "entries_fts", "classes", "classes_fts",
+                   "functions", "properties", "analysis_log"):
+            self.assertIn(t, tables)
 
     def test_indexes_exist(self):
         indexes = {
@@ -50,9 +53,17 @@ class TestSchema(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='index'"
             ).fetchall()
         }
-        self.assertIn("idx_entries_subsystem", indexes)
-        self.assertIn("idx_entries_category", indexes)
-        self.assertIn("idx_entries_updated", indexes)
+        expected = {
+            "idx_entries_subsystem", "idx_entries_category", "idx_entries_updated",
+            "idx_classes_name", "idx_classes_parent", "idx_classes_subsystem",
+            "idx_classes_module", "idx_classes_kind", "idx_classes_depth",
+            "idx_functions_class", "idx_functions_subsystem", "idx_functions_name",
+            "idx_functions_qualified",
+            "idx_properties_class", "idx_properties_subsystem", "idx_properties_qualified",
+            "idx_analysis_file", "idx_analysis_module",
+        }
+        for idx in expected:
+            self.assertIn(idx, indexes)
 
     def test_triggers_exist(self):
         triggers = {
@@ -61,13 +72,19 @@ class TestSchema(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='trigger'"
             ).fetchall()
         }
-        self.assertEqual(triggers, {"entries_ai", "entries_au", "entries_ad"})
+        expected = {"entries_ai", "entries_au", "entries_ad",
+                     "classes_ai", "classes_au", "classes_ad"}
+        self.assertEqual(triggers, expected)
 
     def test_empty_db_stats(self):
         stats = self.db.stats()
         self.assertEqual(stats["total"], 0)
         self.assertEqual(stats["by_subsystem"], {})
         self.assertEqual(stats["by_category"], {})
+        self.assertEqual(stats["structured"]["classes"], 0)
+        self.assertEqual(stats["structured"]["functions"], 0)
+        self.assertEqual(stats["structured"]["properties"], 0)
+        self.assertEqual(stats["structured"]["files_analyzed"], 0)
 
 
 class TestSave(unittest.TestCase):
@@ -517,6 +534,550 @@ class TestStats(unittest.TestCase):
         self.assertEqual(stats["by_category"]["class"], 1)
         self.assertEqual(stats["by_category"]["gotcha"], 1)
         self.assertEqual(stats["by_category"]["macro"], 1)
+
+
+# ── Structured code table tests ───────────────────────────────────────────────
+
+
+class _DBTestCase(unittest.TestCase):
+    """Base class with setUp/tearDown for temp DB."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        with patch("server.DB_PATH", Path(self.tmp.name)):
+            self.db = KnowledgeDB()
+
+    def tearDown(self):
+        self.db.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+
+class TestSaveClass(_DBTestCase):
+    """Saving classes: create, upsert/merge, validation."""
+
+    def _save_actor(self, **overrides):
+        defaults = dict(
+            name="AActor", kind="class", subsystem="gameplay",
+            module="Engine", header_path="Runtime/Engine/Classes/GameFramework/Actor.h",
+        )
+        defaults.update(overrides)
+        return self.db.save_class(**defaults)
+
+    def test_create_returns_id(self):
+        result = self._save_actor()
+        self.assertTrue(result["upserted"])
+        self.assertEqual(result["action"], "created")
+        self.assertGreater(result["id"], 0)
+
+    def test_get_class(self):
+        self._save_actor(summary="Base actor class")
+        cls = self.db.get_class("AActor")
+        self.assertIsNotNone(cls)
+        self.assertEqual(cls["name"], "AActor")
+        self.assertEqual(cls["kind"], "class")
+        self.assertEqual(cls["summary"], "Base actor class")
+
+    def test_get_class_nonexistent(self):
+        self.assertIsNone(self.db.get_class("UNonexistent"))
+
+    def test_upsert_updates_existing(self):
+        self._save_actor()
+        result = self._save_actor(summary="Updated summary")
+        self.assertEqual(result["action"], "updated")
+        cls = self.db.get_class("AActor")
+        self.assertEqual(cls["summary"], "Updated summary")
+
+    def test_upsert_merges_arrays(self):
+        self._save_actor(known_children=["APawn"])
+        self._save_actor(known_children=["AInfo", "APawn"])
+        cls = self.db.get_class("AActor")
+        self.assertEqual(sorted(cls["known_children"]), ["AInfo", "APawn"])
+
+    def test_upsert_merges_interfaces(self):
+        self._save_actor(interfaces=["INavAgentInterface"])
+        self._save_actor(interfaces=["IVisualLoggerDebugSnapshotInterface"])
+        cls = self.db.get_class("AActor")
+        self.assertEqual(len(cls["interfaces"]), 2)
+
+    def test_depth_only_upgrades(self):
+        self._save_actor(analysis_depth="stub")
+        self._save_actor(analysis_depth="shallow")
+        cls = self.db.get_class("AActor")
+        self.assertEqual(cls["analysis_depth"], "shallow")
+
+    def test_depth_does_not_downgrade(self):
+        self._save_actor(analysis_depth="deep")
+        self._save_actor(analysis_depth="stub")
+        cls = self.db.get_class("AActor")
+        self.assertEqual(cls["analysis_depth"], "deep")
+
+    def test_invalid_kind(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._save_actor(kind="invalid")
+        self.assertIn("Invalid kind", str(ctx.exception))
+
+    def test_invalid_subsystem(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._save_actor(subsystem="invalid")
+        self.assertIn("Invalid subsystem", str(ctx.exception))
+
+    def test_all_valid_kinds(self):
+        for kind in VALID_KINDS:
+            result = self.db.save_class(
+                name=f"Test{kind}", kind=kind, subsystem="core",
+                module="Core", header_path="test.h",
+            )
+            self.assertTrue(result["upserted"])
+
+    def test_json_arrays_deserialized_on_get(self):
+        self._save_actor(
+            key_methods=[{"name": "BeginPlay", "brief": "Start"}],
+            key_properties=[{"name": "RootComponent", "type": "USceneComponent*", "specifiers": ""}],
+            key_delegates=[{"name": "OnDestroyed", "signature": "FActorDestroyedSignature"}],
+        )
+        cls = self.db.get_class("AActor")
+        self.assertIsInstance(cls["key_methods"], list)
+        self.assertEqual(cls["key_methods"][0]["name"], "BeginPlay")
+        self.assertIsInstance(cls["key_properties"], list)
+        self.assertIsInstance(cls["key_delegates"], list)
+
+    def test_parent_class_stored(self):
+        self._save_actor(parent_class="UObject")
+        cls = self.db.get_class("AActor")
+        self.assertEqual(cls["parent_class"], "UObject")
+
+    def test_timestamps_set(self):
+        self._save_actor()
+        cls = self.db.get_class("AActor")
+        self.assertIsNotNone(cls["created_at"])
+        self.assertIsNotNone(cls["updated_at"])
+
+    def test_stats_counts_classes(self):
+        self._save_actor()
+        stats = self.db.stats()
+        self.assertEqual(stats["structured"]["classes"], 1)
+        self.assertIn("stub", stats["structured"]["by_depth"])
+
+
+class TestSaveFunction(_DBTestCase):
+    """Saving functions: create, upsert, validation."""
+
+    def _save_beginplay(self, **overrides):
+        defaults = dict(
+            name="BeginPlay", subsystem="gameplay",
+            class_name="AActor", return_type="void",
+            is_virtual=True, summary="Called when play begins.",
+        )
+        defaults.update(overrides)
+        return self.db.save_function(**defaults)
+
+    def test_create(self):
+        result = self._save_beginplay()
+        self.assertTrue(result["upserted"])
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["qualified_name"], "AActor::BeginPlay")
+
+    def test_upsert_updates(self):
+        self._save_beginplay()
+        result = self._save_beginplay(summary="Updated desc")
+        self.assertEqual(result["action"], "updated")
+
+    def test_qualified_name_auto(self):
+        result = self._save_beginplay()
+        self.assertEqual(result["qualified_name"], "AActor::BeginPlay")
+
+    def test_free_function_no_class(self):
+        result = self.db.save_function(name="IsValid", subsystem="core")
+        self.assertEqual(result["qualified_name"], "IsValid")
+
+    def test_invalid_subsystem(self):
+        with self.assertRaises(ValueError):
+            self.db.save_function(name="Foo", subsystem="invalid")
+
+    def test_parameters_stored(self):
+        self._save_beginplay(parameters=[{"name": "DeltaTime", "type": "float"}])
+        row = self.db.conn.execute(
+            "SELECT parameters FROM functions WHERE qualified_name = 'AActor::BeginPlay'"
+        ).fetchone()
+        params = json.loads(row[0])
+        self.assertEqual(params[0]["name"], "DeltaTime")
+
+    def test_boolean_flags(self):
+        self._save_beginplay(
+            is_virtual=True, is_blueprint_callable=True, is_rpc=True,
+            rpc_type="Server",
+        )
+        row = self.db.conn.execute(
+            "SELECT is_virtual, is_blueprint_callable, is_rpc, rpc_type FROM functions WHERE qualified_name = 'AActor::BeginPlay'"
+        ).fetchone()
+        self.assertEqual(row[0], 1)  # is_virtual
+        self.assertEqual(row[1], 1)  # is_blueprint_callable
+        self.assertEqual(row[2], 1)  # is_rpc
+        self.assertEqual(row[3], "Server")
+
+    def test_call_chains_stored(self):
+        self._save_beginplay(
+            calls_into=["AActor::PostInitializeComponents"],
+            called_by=["UWorld::BeginPlay"],
+        )
+        row = self.db.conn.execute(
+            "SELECT calls_into, called_by FROM functions WHERE qualified_name = 'AActor::BeginPlay'"
+        ).fetchone()
+        self.assertIn("PostInitializeComponents", row[0])
+        self.assertIn("UWorld::BeginPlay", row[1])
+
+    def test_stats_counts_functions(self):
+        self._save_beginplay()
+        stats = self.db.stats()
+        self.assertEqual(stats["structured"]["functions"], 1)
+
+
+class TestSaveProperty(_DBTestCase):
+    """Saving properties: create, upsert, validation."""
+
+    def _save_rootcomp(self, **overrides):
+        defaults = dict(
+            name="RootComponent", class_name="AActor",
+            subsystem="gameplay", property_type="TObjectPtr<USceneComponent>",
+            uproperty_specifiers="BlueprintReadOnly, VisibleAnywhere",
+        )
+        defaults.update(overrides)
+        return self.db.save_property(**defaults)
+
+    def test_create(self):
+        result = self._save_rootcomp()
+        self.assertTrue(result["upserted"])
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(result["qualified_name"], "AActor::RootComponent")
+
+    def test_upsert_updates(self):
+        self._save_rootcomp()
+        result = self._save_rootcomp(summary="Updated")
+        self.assertEqual(result["action"], "updated")
+
+    def test_invalid_subsystem(self):
+        with self.assertRaises(ValueError):
+            self._save_rootcomp(subsystem="invalid")
+
+    def test_replication_fields(self):
+        self._save_rootcomp(
+            is_replicated=True,
+            replicated_using="OnRep_RootComponent",
+        )
+        row = self.db.conn.execute(
+            "SELECT is_replicated, replicated_using FROM properties WHERE qualified_name = 'AActor::RootComponent'"
+        ).fetchone()
+        self.assertEqual(row[0], 1)
+        self.assertEqual(row[1], "OnRep_RootComponent")
+
+    def test_blueprint_flags(self):
+        self._save_rootcomp(
+            is_blueprint_visible=True,
+            is_edit_anywhere=True,
+            is_config=False,
+        )
+        row = self.db.conn.execute(
+            "SELECT is_blueprint_visible, is_edit_anywhere, is_config FROM properties WHERE qualified_name = 'AActor::RootComponent'"
+        ).fetchone()
+        self.assertEqual(row[0], 1)
+        self.assertEqual(row[1], 1)
+        self.assertEqual(row[2], 0)
+
+    def test_stats_counts_properties(self):
+        self._save_rootcomp()
+        stats = self.db.stats()
+        self.assertEqual(stats["structured"]["properties"], 1)
+
+
+class TestQueryHierarchy(_DBTestCase):
+    """Hierarchy traversal: parents and children."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.save_class(name="UObject", kind="class", subsystem="core",
+                           module="CoreUObject", header_path="UObject/Object.h")
+        self.db.save_class(name="AActor", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Actor.h", parent_class="UObject")
+        self.db.save_class(name="APawn", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Pawn.h", parent_class="AActor")
+        self.db.save_class(name="ACharacter", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Character.h", parent_class="APawn")
+        self.db.save_class(name="AInfo", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Info.h", parent_class="AActor")
+
+    def test_parents_chain(self):
+        result = self.db.query_hierarchy("ACharacter", direction="parents")
+        self.assertEqual(result["parents"], ["APawn", "AActor", "UObject"])
+        self.assertEqual(result["children"], [])
+
+    def test_children(self):
+        result = self.db.query_hierarchy("AActor", direction="children")
+        child_names = [c["name"] for c in result["children"]]
+        self.assertIn("APawn", child_names)
+        self.assertIn("AInfo", child_names)
+
+    def test_both_directions(self):
+        result = self.db.query_hierarchy("APawn", direction="both")
+        self.assertIn("AActor", result["parents"])
+        child_names = [c["name"] for c in result["children"]]
+        self.assertIn("ACharacter", child_names)
+
+    def test_root_has_no_parents(self):
+        result = self.db.query_hierarchy("UObject", direction="parents")
+        self.assertEqual(result["parents"], [])
+
+    def test_leaf_has_no_children(self):
+        result = self.db.query_hierarchy("ACharacter", direction="children")
+        self.assertEqual(result["children"], [])
+
+    def test_depth_limit(self):
+        result = self.db.query_hierarchy("ACharacter", direction="parents", depth=1)
+        self.assertEqual(len(result["parents"]), 1)
+        self.assertEqual(result["parents"][0], "APawn")
+
+    def test_nested_children_structure(self):
+        result = self.db.query_hierarchy("AActor", direction="children")
+        # APawn should have ACharacter as child
+        pawn = next(c for c in result["children"] if c["name"] == "APawn")
+        char_names = [c["name"] for c in pawn["children"]]
+        self.assertIn("ACharacter", char_names)
+
+
+class TestQueryCalls(_DBTestCase):
+    """Call chain queries."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.save_function(
+            name="BeginPlay", subsystem="gameplay", class_name="AActor",
+            summary="Called when play begins.",
+            call_context="Called by engine after all components initialized.",
+            call_order="After PostInitializeComponents",
+            calls_into=["AActor::ReceiveBeginPlay"],
+            called_by=["UWorld::BeginPlay"],
+        )
+
+    def test_query_by_qualified_name(self):
+        result = self.db.query_calls("AActor::BeginPlay")
+        self.assertEqual(result["function"], "AActor::BeginPlay")
+        self.assertIn("calls_into", result)
+        self.assertIn("called_by", result)
+
+    def test_query_by_plain_name(self):
+        result = self.db.query_calls("BeginPlay")
+        self.assertEqual(result["function"], "AActor::BeginPlay")
+
+    def test_callees_only(self):
+        result = self.db.query_calls("AActor::BeginPlay", direction="callees")
+        self.assertIn("calls_into", result)
+        self.assertNotIn("called_by", result)
+
+    def test_callers_only(self):
+        result = self.db.query_calls("AActor::BeginPlay", direction="callers")
+        self.assertIn("called_by", result)
+        self.assertNotIn("calls_into", result)
+
+    def test_not_found(self):
+        result = self.db.query_calls("Nonexistent::Func")
+        self.assertIn("error", result)
+
+
+class TestQueryClassFull(_DBTestCase):
+    """Full class query with linked functions and properties."""
+
+    def setUp(self):
+        super().setUp()
+        self.db.save_class(
+            name="AActor", kind="class", subsystem="gameplay",
+            module="Engine", header_path="Actor.h",
+            parent_class="UObject", summary="Base actor.",
+        )
+        self.db.save_function(
+            name="BeginPlay", subsystem="gameplay", class_name="AActor",
+            summary="Begin play.", is_virtual=True,
+        )
+        self.db.save_property(
+            name="RootComponent", class_name="AActor",
+            subsystem="gameplay", property_type="USceneComponent*",
+        )
+
+    def test_full_query(self):
+        result = self.db.query_class_full("AActor")
+        self.assertEqual(result["name"], "AActor")
+        self.assertEqual(len(result["functions"]), 1)
+        self.assertEqual(result["functions"][0]["name"], "BeginPlay")
+        self.assertEqual(len(result["properties_detail"]), 1)
+        self.assertEqual(result["properties_detail"][0]["name"], "RootComponent")
+
+    def test_exclude_methods(self):
+        result = self.db.query_class_full("AActor", include_methods=False)
+        self.assertNotIn("functions", result)
+
+    def test_exclude_properties(self):
+        result = self.db.query_class_full("AActor", include_properties=False)
+        self.assertNotIn("properties_detail", result)
+
+    def test_not_found(self):
+        result = self.db.query_class_full("UNonexistent")
+        self.assertIn("error", result)
+
+    def test_linked_narrative_entry(self):
+        entry_id = self.db.save("AActor lifecycle", "gameplay", "class", "s", "c")
+        self.db.save_class(
+            name="AActor", kind="class", subsystem="gameplay",
+            module="Engine", header_path="Actor.h", entry_id=entry_id,
+        )
+        result = self.db.query_class_full("AActor")
+        self.assertIn("narrative_entry", result)
+        self.assertEqual(result["narrative_entry"]["id"], entry_id)
+
+
+class TestAnalysisLog(_DBTestCase):
+    """Analysis logging and status."""
+
+    def test_log_analysis(self):
+        result = self.db.log_analysis(
+            file_path="Runtime/Engine/Classes/GameFramework/Actor.h",
+            module="Engine", subsystem="gameplay", analysis_depth="shallow",
+            classes_found=3, functions_found=15, properties_found=8,
+        )
+        self.assertTrue(result["logged"])
+        self.assertGreater(result["id"], 0)
+
+    def test_log_invalid_subsystem(self):
+        with self.assertRaises(ValueError):
+            self.db.log_analysis(
+                file_path="test.h", module="Test",
+                subsystem="invalid", analysis_depth="stub",
+            )
+
+    def test_analysis_status_empty(self):
+        result = self.db.analysis_status()
+        self.assertEqual(result["total_classes"], 0)
+        self.assertEqual(result["files_analyzed"], 0)
+
+    def test_analysis_status_with_data(self):
+        self.db.save_class(name="AActor", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Actor.h", analysis_depth="shallow")
+        self.db.log_analysis(
+            file_path="Actor.h", module="Engine",
+            subsystem="gameplay", analysis_depth="shallow",
+        )
+        result = self.db.analysis_status()
+        self.assertEqual(result["total_classes"], 1)
+        self.assertEqual(result["files_analyzed"], 1)
+        self.assertEqual(result["by_depth"]["shallow"], 1)
+        self.assertIn("Engine", result["breakdown"])
+
+    def test_analysis_status_filter_by_module(self):
+        self.db.log_analysis(file_path="A.h", module="Engine", subsystem="gameplay", analysis_depth="shallow")
+        self.db.log_analysis(file_path="B.h", module="CoreUObject", subsystem="core", analysis_depth="stub")
+        result = self.db.analysis_status(module="Engine")
+        self.assertIn("Engine", result["breakdown"])
+        self.assertNotIn("CoreUObject", result["breakdown"])
+
+    def test_analysis_status_filter_by_subsystem(self):
+        self.db.log_analysis(file_path="A.h", module="Engine", subsystem="gameplay", analysis_depth="shallow")
+        self.db.log_analysis(file_path="B.h", module="CoreUObject", subsystem="core", analysis_depth="stub")
+        result = self.db.analysis_status(subsystem="gameplay")
+        # breakdown should only contain Engine (the one with gameplay subsystem)
+        for key, depths in result["breakdown"].items():
+            total = sum(depths.values())
+            self.assertGreater(total, 0)
+
+    def test_stats_counts_files_analyzed(self):
+        self.db.log_analysis(file_path="A.h", module="M", subsystem="core", analysis_depth="stub")
+        stats = self.db.stats()
+        self.assertEqual(stats["structured"]["files_analyzed"], 1)
+
+
+class TestHandleStructured(_DBTestCase):
+    """MCP _handle dispatcher for structured code tools."""
+
+    def test_handle_save_class(self):
+        result = _handle(self.db, "ue_save_class", {
+            "name": "AActor", "kind": "class", "subsystem": "gameplay",
+            "module": "Engine", "header_path": "Actor.h",
+            "summary": "Base actor",
+        })
+        self.assertTrue(result["upserted"])
+        self.assertEqual(result["name"], "AActor")
+
+    def test_handle_save_class_invalid_kind(self):
+        with self.assertRaises(ValueError):
+            _handle(self.db, "ue_save_class", {
+                "name": "AActor", "kind": "invalid", "subsystem": "gameplay",
+                "module": "Engine", "header_path": "Actor.h",
+            })
+
+    def test_handle_save_function(self):
+        result = _handle(self.db, "ue_save_function", {
+            "name": "BeginPlay", "subsystem": "gameplay",
+            "class_name": "AActor", "is_virtual": True,
+        })
+        self.assertTrue(result["upserted"])
+        self.assertEqual(result["qualified_name"], "AActor::BeginPlay")
+
+    def test_handle_save_property(self):
+        result = _handle(self.db, "ue_save_property", {
+            "name": "RootComponent", "class_name": "AActor",
+            "subsystem": "gameplay", "property_type": "USceneComponent*",
+        })
+        self.assertTrue(result["upserted"])
+        self.assertEqual(result["qualified_name"], "AActor::RootComponent")
+
+    def test_handle_query_class(self):
+        self.db.save_class(name="AActor", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Actor.h")
+        result = _handle(self.db, "ue_query_class", {"class_name": "AActor"})
+        self.assertEqual(result["name"], "AActor")
+
+    def test_handle_query_class_not_found(self):
+        result = _handle(self.db, "ue_query_class", {"class_name": "UNonexistent"})
+        self.assertIn("error", result)
+
+    def test_handle_query_hierarchy(self):
+        self.db.save_class(name="UObject", kind="class", subsystem="core",
+                           module="CoreUObject", header_path="Object.h")
+        self.db.save_class(name="AActor", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Actor.h", parent_class="UObject")
+        result = _handle(self.db, "ue_query_hierarchy", {
+            "class_name": "AActor", "direction": "parents",
+        })
+        self.assertIn("UObject", result["parents"])
+
+    def test_handle_query_calls(self):
+        self.db.save_function(name="BeginPlay", subsystem="gameplay", class_name="AActor",
+                              calls_into=["AActor::ReceiveBeginPlay"])
+        result = _handle(self.db, "ue_query_calls", {"function_name": "AActor::BeginPlay"})
+        self.assertEqual(result["function"], "AActor::BeginPlay")
+
+    def test_handle_analysis_status(self):
+        result = _handle(self.db, "ue_analysis_status", {})
+        self.assertIn("total_classes", result)
+        self.assertIn("files_analyzed", result)
+
+    def test_handle_log_analysis(self):
+        result = _handle(self.db, "ue_log_analysis", {
+            "file_path": "Actor.h", "module": "Engine",
+            "subsystem": "gameplay", "analysis_depth": "shallow",
+        })
+        self.assertTrue(result["logged"])
+
+    def test_handle_save_class_does_not_mutate_args(self):
+        args = {"name": "AActor", "kind": "class", "subsystem": "gameplay",
+                "module": "Engine", "header_path": "Actor.h"}
+        args_copy = dict(args)
+        _handle(self.db, "ue_save_class", args)
+        self.assertEqual(args, args_copy)
+
+    def test_handle_stats_includes_structured(self):
+        self.db.save_class(name="AActor", kind="class", subsystem="gameplay",
+                           module="Engine", header_path="Actor.h")
+        result = _handle(self.db, "ue_stats", {})
+        self.assertIn("structured", result)
+        self.assertEqual(result["structured"]["classes"], 1)
 
 
 if __name__ == "__main__":
