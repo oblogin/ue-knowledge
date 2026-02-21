@@ -100,23 +100,24 @@ CREATE INDEX IF NOT EXISTS idx_classes_depth ON classes(analysis_depth);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS classes_fts USING fts5(
     name, parent_class, summary, doc_comment, module, lifecycle_order,
+    key_methods, key_properties, key_delegates,
     content=classes, content_rowid=id,
     tokenize='porter unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS classes_ai AFTER INSERT ON classes BEGIN
-    INSERT INTO classes_fts(rowid, name, parent_class, summary, doc_comment, module, lifecycle_order)
-    VALUES (new.id, new.name, new.parent_class, new.summary, new.doc_comment, new.module, new.lifecycle_order);
+    INSERT INTO classes_fts(rowid, name, parent_class, summary, doc_comment, module, lifecycle_order, key_methods, key_properties, key_delegates)
+    VALUES (new.id, new.name, new.parent_class, new.summary, new.doc_comment, new.module, new.lifecycle_order, new.key_methods, new.key_properties, new.key_delegates);
 END;
 CREATE TRIGGER IF NOT EXISTS classes_au AFTER UPDATE ON classes BEGIN
-    INSERT INTO classes_fts(classes_fts, rowid, name, parent_class, summary, doc_comment, module, lifecycle_order)
-    VALUES ('delete', old.id, old.name, old.parent_class, old.summary, old.doc_comment, old.module, old.lifecycle_order);
-    INSERT INTO classes_fts(rowid, name, parent_class, summary, doc_comment, module, lifecycle_order)
-    VALUES (new.id, new.name, new.parent_class, new.summary, new.doc_comment, new.module, new.lifecycle_order);
+    INSERT INTO classes_fts(classes_fts, rowid, name, parent_class, summary, doc_comment, module, lifecycle_order, key_methods, key_properties, key_delegates)
+    VALUES ('delete', old.id, old.name, old.parent_class, old.summary, old.doc_comment, old.module, old.lifecycle_order, old.key_methods, old.key_properties, old.key_delegates);
+    INSERT INTO classes_fts(rowid, name, parent_class, summary, doc_comment, module, lifecycle_order, key_methods, key_properties, key_delegates)
+    VALUES (new.id, new.name, new.parent_class, new.summary, new.doc_comment, new.module, new.lifecycle_order, new.key_methods, new.key_properties, new.key_delegates);
 END;
 CREATE TRIGGER IF NOT EXISTS classes_ad AFTER DELETE ON classes BEGIN
-    INSERT INTO classes_fts(classes_fts, rowid, name, parent_class, summary, doc_comment, module, lifecycle_order)
-    VALUES ('delete', old.id, old.name, old.parent_class, old.summary, old.doc_comment, old.module, old.lifecycle_order);
+    INSERT INTO classes_fts(classes_fts, rowid, name, parent_class, summary, doc_comment, module, lifecycle_order, key_methods, key_properties, key_delegates)
+    VALUES ('delete', old.id, old.name, old.parent_class, old.summary, old.doc_comment, old.module, old.lifecycle_order, old.key_methods, old.key_properties, old.key_delegates);
 END;
 
 CREATE TABLE IF NOT EXISTS functions (
@@ -313,6 +314,31 @@ MIGRATIONS = [
         END""",
         "INSERT INTO functions_fts(functions_fts) VALUES('rebuild')",
         "INSERT INTO properties_fts(properties_fts) VALUES('rebuild')",
+    ]),
+    (3, "Add key_methods/key_properties/key_delegates to classes_fts", [
+        "DROP TRIGGER IF EXISTS classes_ai",
+        "DROP TRIGGER IF EXISTS classes_au",
+        "DROP TRIGGER IF EXISTS classes_ad",
+        "DROP TABLE IF EXISTS classes_fts",
+        """CREATE VIRTUAL TABLE IF NOT EXISTS classes_fts USING fts5(
+            name, parent_class, summary, doc_comment, module, lifecycle_order,
+            key_methods, key_properties, key_delegates,
+            content=classes, content_rowid=id, tokenize='porter unicode61')""",
+        """CREATE TRIGGER IF NOT EXISTS classes_ai AFTER INSERT ON classes BEGIN
+            INSERT INTO classes_fts(rowid, name, parent_class, summary, doc_comment, module, lifecycle_order, key_methods, key_properties, key_delegates)
+            VALUES (new.id, new.name, new.parent_class, new.summary, new.doc_comment, new.module, new.lifecycle_order, new.key_methods, new.key_properties, new.key_delegates);
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS classes_au AFTER UPDATE ON classes BEGIN
+            INSERT INTO classes_fts(classes_fts, rowid, name, parent_class, summary, doc_comment, module, lifecycle_order, key_methods, key_properties, key_delegates)
+            VALUES ('delete', old.id, old.name, old.parent_class, old.summary, old.doc_comment, old.module, old.lifecycle_order, old.key_methods, old.key_properties, old.key_delegates);
+            INSERT INTO classes_fts(rowid, name, parent_class, summary, doc_comment, module, lifecycle_order, key_methods, key_properties, key_delegates)
+            VALUES (new.id, new.name, new.parent_class, new.summary, new.doc_comment, new.module, new.lifecycle_order, new.key_methods, new.key_properties, new.key_delegates);
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS classes_ad AFTER DELETE ON classes BEGIN
+            INSERT INTO classes_fts(classes_fts, rowid, name, parent_class, summary, doc_comment, module, lifecycle_order, key_methods, key_properties, key_delegates)
+            VALUES ('delete', old.id, old.name, old.parent_class, old.summary, old.doc_comment, old.module, old.lifecycle_order, old.key_methods, old.key_properties, old.key_delegates);
+        END""",
+        "INSERT INTO classes_fts(classes_fts) VALUES('rebuild')",
     ]),
 ]
 
