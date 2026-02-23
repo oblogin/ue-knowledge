@@ -44,6 +44,14 @@ cp commands/ue-analyze.md ~/.claude/commands/ue-analyze.md
 # 6. Restart Claude Code — tools will be available as mcp__ue-knowledge__*
 ```
 
+### Gemini Code / Antigravity Setup
+
+Gemini Code (Antigravity) natively supports MCP servers at the project level and automated workflows.
+
+1. **Register the MCP server**: Create an `.mcp.json` file in your Unreal Engine project root with the same JSON configuration as above.
+2. **Install the workflow**: Copy `workflows/ue-analyze.md` to your project's `~/.agents/workflows/` (or equivalent `workflows` directory based on your gemini setup).
+3. **Restart your session**: The tools will be available, and you can invoke the analysis logic by asking Gemini Code to "run the ue-analyze workflow".
+
 ### Project-level setup
 
 To install for a specific project instead of globally, create `.mcp.json` in the project root:
