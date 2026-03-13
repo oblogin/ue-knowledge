@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ue-knowledge": {
+      "command": "python",
+      "args": ["C:/Users/oblog/.ue-knowledge/server.py"],
+      "type": "stdio"
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # UE Knowledge Base
 
-Local MCP server for building a persistent Unreal Engine knowledge base. Designed to be populated by Claude as it explores UE source code. SQLite + FTS5 full-text search, zero dependencies beyond `mcp`.
+Local MCP server for building a persistent Unreal Engine knowledge base. Designed to be populated by Claude, Codex, or any other MCP-compatible coding agent while it explores UE source code. SQLite + FTS5 full-text search, zero dependencies beyond `mcp`.
 
 ## Install
 
@@ -9,7 +9,41 @@ Local MCP server for building a persistent Unreal Engine knowledge base. Designe
 - Python 3.10+
 - `mcp` library (installed with EchoVault or standalone: `pip install mcp`)
 
-### Setup
+### Quick start after cloning this repository
+
+If you already downloaded or cloned this repository, you can run the MCP server directly from the repo without copying files anywhere else.
+
+The server code can live anywhere, but the SQLite database is created automatically at `~/.ue-knowledge/knowledge.db`.
+
+### Codex setup
+
+From the repository root:
+
+#### Windows PowerShell
+
+```powershell
+python -m pip install mcp
+codex mcp add ue-knowledge -- python (Resolve-Path .\server.py).Path
+```
+
+#### macOS / Linux
+
+```bash
+python3 -m pip install mcp
+codex mcp add ue-knowledge -- python3 "$(pwd)/server.py"
+```
+
+Start a new Codex session after registration. The tools will then be available from the `ue-knowledge` MCP server.
+
+Verify with:
+
+```bash
+codex mcp get ue-knowledge
+```
+
+### Claude Code setup
+
+If you want a global installation that does not depend on the location of the cloned repo, copy `server.py` into `~/.ue-knowledge/` and register that fixed path:
 
 ```bash
 # 1. Create the directory (if not exists)
@@ -71,13 +105,27 @@ To install for a specific project instead of globally, create `.mcp.json` in the
 
 ### Verify
 
+#### Codex
+
+Run:
+
+```bash
+codex mcp list
+```
+
+You should see `ue-knowledge` in the list with `Status enabled`.
+
+Then start a new Codex session and ask it to search the knowledge base.
+
+#### Claude Code
+
 After restarting Claude Code, ask:
 
 ```
 Search the UE knowledge base for "actor"
 ```
 
-If tools are loaded, Claude will call `ue_search`. On a fresh install with empty DB, it will return 0 results — that's correct.
+If tools are loaded, the agent will call `ue_search`. On a fresh install with empty DB, it will return 0 results — that's correct.
 
 ## Usage
 
@@ -631,19 +679,22 @@ sqlite3 -json ~/.ue-knowledge/knowledge.db "SELECT * FROM entries" > entries.jso
 ## Uninstall
 
 ```bash
-# 1. Remove hooks from ~/.claude/settings.json
+# 1. Remove MCP server from Codex (if you added it with `codex mcp add`)
+codex mcp remove ue-knowledge
+
+# 2. Remove hooks from ~/.claude/settings.json
 # Delete the ue-kb-session-start, ue-kb-prompt-context, ue-kb-save-reminder entries
 
-# 2. Remove MCP server from ~/.claude.json
+# 3. Remove MCP server from ~/.claude.json
 # Delete the "ue-knowledge" entry under "mcpServers"
 
-# 3. Remove CLAUDE.md instructions (if added)
+# 4. Remove CLAUDE.md instructions (if added)
 # Edit ~/.claude/CLAUDE.md and remove the UE Knowledge Base section
 
-# 4. Remove files
+# 5. Remove files
 rm -rf ~/.ue-knowledge
 
-# 5. Clean up lock files
+# 6. Clean up lock files
 rm -rf /tmp/ue-kb-hooks
 ```
 
